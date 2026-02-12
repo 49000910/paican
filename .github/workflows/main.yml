@@ -1,22 +1,38 @@
-name: Build EXE
-on: [push]
+name: Build Outlook Sync EXE
+
+on: 
+  push:
+    branches: [ "main" ] # 只有推送到 main 分支时才触发，或者根据需要修改
+  pull_request:
+    branches: [ "main" ]
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-latest # 必须在 Windows 环境下打包 EXE
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4 # 升级到 v4
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 升级到 v5
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pyinstaller pywin32 PyQt5
+
       - name: Build with PyInstaller
         run: |
+          # --onefile 打包成单个 EXE
+          # --windowed 运行时不显示黑色的命令行窗口
+          # --name 设置生成的文件名
           pyinstaller --onefile --windowed --name "OutlookSyncMaster" main.py
+
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4 # 核心修复点：升级到 v4
         with:
           name: OutlookSyncMaster-EXE
           path: dist/OutlookSyncMaster.exe
