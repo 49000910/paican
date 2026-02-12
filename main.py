@@ -3,16 +3,14 @@ import os
 import re
 import time
 import win32com.client
-import pythoncom
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QSystemTrayIcon, QMenu)
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QIcon, QFont
 
 class OutlookMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 默认配置 ---
+        # --- 初始配置 ---
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_sender = 'zhoubaozhen1@huawei.com'
         self.scan_ms = 2000 
@@ -26,9 +24,9 @@ class OutlookMaster(QWidget):
         self.timer.start(self.scan_ms)
 
     def init_ui(self):
-        self.setWindowTitle("Outlook 同步管理端")
-        self.resize(500, 400)
-        self.setWindowFlags(Qt.WindowStaysOnTopHint) # 开启悬浮置顶
+        self.setWindowTitle("Outlook 同步管理端 Pro")
+        self.resize(500, 450)
+        self.setWindowFlags(Qt.WindowStaysOnTopHint) # 悬浮置顶
         
         layout = QVBoxLayout()
         
@@ -49,7 +47,7 @@ class OutlookMaster(QWidget):
         h_layout.addWidget(self.edit_freq)
         
         self.btn_apply = QPushButton("保存并应用配置")
-        self.btn_apply.setStyleSheet("background: #0078d4; color: white; font-weight: bold;")
+        self.btn_apply.setStyleSheet("background: #0078d4; color: white; font-weight: bold; padding: 5px;")
         self.btn_apply.clicked.connect(self.apply_settings)
         h_layout.addWidget(self.btn_apply)
         layout.addLayout(h_layout)
@@ -62,22 +60,27 @@ class OutlookMaster(QWidget):
         layout.addWidget(self.log_area)
 
         self.setLayout(layout)
-        self.add_log("系统就绪，置顶监控已启动...")
+        self.add_log("系统已就绪，正在实时监控信号...")
 
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(21)) # 默认邮件图标
+        # 使用系统默认图标
+        self.tray.setIcon(self.style().standardIcon(21)) 
         
         menu = QMenu()
         menu.addAction("打开主界面", self.showNormal)
         menu.addAction("彻底退出", QApplication.instance().quit)
         
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda r: self.showNormal() if r == QSystemTrayIcon.Trigger else None)
+        self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
 
+    def on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            self.showNormal()
+
     def closeEvent(self, event):
-        """关闭窗口时隐藏到托盘"""
+        """点击关闭按钮时隐藏到系统托盘"""
         self.hide()
         self.tray.showMessage("同步助手", "已转入后台运行", QSystemTrayIcon.Information, 1500)
         event.ignore()
@@ -88,18 +91,24 @@ class OutlookMaster(QWidget):
     def apply_settings(self):
         self.share_dir = self.edit_path.text().strip()
         self.target_sender = self.edit_sender.text().strip()
-        self.scan_ms = int(self.edit_freq.text())
-        self.timer.start(self.scan_ms)
-        self.add_log(f"✅ 配置更新：正在监控 {self.target_sender}")
-        self.generate_html_index() # 立即刷新网页
+        try:
+            self.scan_ms = int(self.edit_freq.text())
+            self.timer.start(self.scan_ms)
+            self.add_log(f"✅ 配置更新：正在监控 {self.target_sender}")
+            self.generate_html_index() 
+        except:
+            self.add_log("❌ 频率请输入数字")
 
     def poll_signal(self):
         sig_file = os.path.join(self.share_dir, "sync_request.txt")
         if os.path.exists(sig_file):
-            self.add_log("📩 收到信号，执行同步...")
+            self.add_log("📩 收到信号，开始抓取邮件...")
             self.run_sync()
-            try: os.remove(sig_file)
-            except: pass
+            try:
+                os.remove(sig_file)
+                self.add_log("🗑️ 信号处理完毕。")
+            except Exception as e:
+                self.add_log(f"⚠ 无法删除信号文件: {e}")
 
     def run_sync(self):
         try:
@@ -112,58 +121,72 @@ class OutlookMaster(QWidget):
                 if item.Class == 43 and self.target_sender.lower() in item.SenderEmailAddress.lower():
                     subj = item.Subject
                     r_time = item.ReceivedTime.strftime("%Y%m%d_%H%M%S")
-                    fname = f"{r_time}_{re.sub(r'[\\/:*?<>|]', '_', subj)[:50]}.html"
+                    
+                    # 修复：将正则提取出 f-string，兼容 Python 3.9
+                    clean_subj = re.sub(r'[\\/:*?<>|]', '_', subj)[:50]
+                    fname = f"{r_time}_{clean_subj}.html"
                     fpath = os.path.join(self.share_dir, fname)
                     
                     if not os.path.exists(fpath):
                         item.SaveAs(fpath, 4)
-                        self.add_log(f"✅ 已存: {subj}")
+                        self.add_log(f"✅ 已存新邮件: {subj}")
                         if item.Attachments.Count > 0:
                             att_p = os.path.join(self.share_dir, f"{r_time}_附件")
                             if not os.path.exists(att_p): os.makedirs(att_p)
                             for i in range(1, item.Attachments.Count + 1):
-                                item.Attachments.Item(i).SaveAsFile(os.path.join(att_p, item.Attachments.Item(i).FileName))
+                                att = item.Attachments.Item(i)
+                                att.SaveAsFile(os.path.join(att_p, att.FileName))
                     else:
-                        self.add_log("ℹ️ 邮件重复，跳过。")
+                        self.add_log("ℹ 邮件已存在，跳过。")
                     break
             self.generate_html_index()
         except Exception as e:
-            self.add_log(f"❌ 错误: {e}")
+            self.add_log(f"❌ Outlook 错误: {e}")
 
     def generate_html_index(self):
-        """生成供同事查看的 index.html"""
+        """同步本地配置到共享盘的预览页面"""
+        if not os.path.exists(self.share_dir): return
         files = [f for f in os.listdir(self.share_dir) if f.endswith('.html') and f != 'index.html']
         files.sort(reverse=True)
+        
         html = f"""
-        <html><head><meta charset='utf-8'><title>预览</title>
+        <html><head><meta charset='utf-8'><title>邮件预览</title>
         <style>
-            body {{ font-family: sans-serif; padding: 20px; background: #f3f2f1; }}
-            .card {{ background: white; padding: 15px; margin: 10px 0; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; align-items:center; }}
-            .btn {{ background: #0078d4; color: white; padding: 10px; border:none; cursor:pointer; border-radius: 4px; }}
-            a {{ flex:1; text-decoration: none; color: #0078d4; font-weight: bold; }}
+            body {{ font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f3f2f1; }}
+            .header {{ background: #0078d4; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+            .card {{ background: white; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 5px solid #0078d4; display: flex; align-items:center; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+            .btn {{ background: white; color: #0078d4; padding: 10px 20px; border:none; cursor:pointer; border-radius: 4px; font-weight: bold; }}
+            a {{ flex:1; text-decoration: none; color: #333; font-weight: 600; margin-left: 15px; }}
+            a:hover {{ color: #0078d4; }}
         </style>
         <script>
             function sync() {{
+                const blob = new Blob(['sync'], {{type:'text/plain'}});
                 const a = document.createElement('a');
-                a.href = window.URL.createObjectURL(new Blob(['s'], {{type:'text/plain'}}));
+                a.href = window.URL.createObjectURL(blob);
                 a.download = 'sync_request.txt';
                 a.click();
-                alert('信号已发出，请保存到共享目录并等待刷新');
+                alert('同步请求已发出，请保存到共享目录并等待几秒后刷新页面。');
                 setTimeout(()=>location.reload(), 5000);
             }}
         </script>
         </head><body>
-            <h2>📩 邮件列表 (来自: {self.target_sender})</h2>
-            <button class="btn" onclick="sync()">🔄 一键同步最新邮件</button><hr>
+            <div class="header">
+                <h2 style="margin:0;">📩 邮件同步列表</h2>
+                <p style="margin:5px 0 15px;">当前监控: {self.target_sender}</p>
+                <button class="btn" onclick="sync()">🔄 网页端一键抓取最新</button>
+            </div>
         """
         for f in files:
-            html += f'<div class="card"><span>[{f[:15]}] </span><a href="{f}" target="_blank">{f[16:-5]}</a></div>'
+            html += f'<div class="card"><small style="color:#888">{f[:15]}</small><a href="{f}" target="_blank">{f[16:-5]}</a></div>'
         html += "</body></html>"
+        
         with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as f:
             f.write(html)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    # 保证即使主窗口关闭，进程也在托盘运行
     QApplication.setQuitOnLastWindowClosed(False)
     m = OutlookMaster()
     m.show()
