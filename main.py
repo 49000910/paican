@@ -1,5 +1,5 @@
 import sys, os, re, time, subprocess, tempfile, urllib.parse, base64, email
-# 修正 QStyle 导入路径
+# 修正 QStyle 导入路径，防止打包报错
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QSystemTrayIcon, QMenu, QAction, QStyle)
@@ -9,7 +9,7 @@ from PyQt5.QtGui import QIcon
 class OutlookMHTMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 默认配置参数 ---
+        # --- 默认参数设置 ---
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.interval_min = 10     
@@ -19,6 +19,7 @@ class OutlookMHTMaster(QWidget):
         self.theme_color = "#107c10" 
         self.web_title = "EDFA 排产看板"
         self.web_sub_title = "自动抓取 zouqiu@hauwei.com"
+        self.copyright_text = "© 2024-2026 R1231685 | 技术支持"
         
         self.init_ui()
         self.init_tray()
@@ -27,7 +28,7 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板管理后台 V26.9.3")
+        self.setWindowTitle("EDFA 看板管理后台 V26.9.7")
         self.resize(500, 750)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
@@ -56,7 +57,9 @@ class OutlookMHTMaster(QWidget):
         layout.addLayout(h2)
 
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
-        self.btn_apply = QPushButton("🚀 部署并同步 (看板全屏模式)")
+        quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
+
+        self.btn_apply = QPushButton("🚀 立即部署并同步 (看板全屏模式)")
         self.btn_apply.setFixedHeight(50); self.btn_apply.clicked.connect(self.apply_settings)
         layout.addWidget(self.btn_apply)
 
@@ -66,7 +69,7 @@ class OutlookMHTMaster(QWidget):
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        tm = QMenu(); tm.addAction("显示界面", self.showNormal); tm.addAction("退出", QApplication.instance().quit)
+        tm = QMenu(); tm.addAction("显示界面", self.showNormal); tm.addAction("退出程序", QApplication.instance().quit)
         self.tray.setContextMenu(tm); self.tray.show()
 
     def closeEvent(self, event):
@@ -80,7 +83,7 @@ class OutlookMHTMaster(QWidget):
         self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {str(txt)}")
 
     def apply_settings(self):
-        self.restyle(); self.add_log("⚙️ 配置下发完成..."); self.run_cycle()
+        self.restyle(); self.add_log("⚙️ 配置同步成功..."); self.run_cycle()
 
     def run_cycle(self):
         now_h = int(time.strftime("%H"))
@@ -120,11 +123,10 @@ class OutlookMHTMaster(QWidget):
                     msg = email.message_from_binary_file(fp)
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
-                            # 注入基础字体大小样式，提升预览舒适度
-                            clean_h = f"<style>body{{font-family:sans-serif;padding:20px;font-size:15px;line-height:1.6;}}</style>" + part.get_payload(decode=True).decode('utf-8','ignore')
+                            clean_h = f"<style>body{{font-family:sans-serif;padding:15px;font-size:14px;background:#fff;}}</style>" + part.get_payload(decode=True).decode('utf-8','ignore')
                             with open(p_h, 'w', encoding='utf-8') as hw: hw.write(clean_h)
                             break
-                os.remove(p_m); self.add_log(f"✅ 抓取成功: {f}")
+                os.remove(p_m); self.add_log(f"✅ 同步成功: {f}")
             except: pass
         self.build_index()
 
@@ -133,9 +135,10 @@ class OutlookMHTMaster(QWidget):
         all_files = [f for f in os.listdir(d) if f.endswith('.html') and f not in ['index.html', 'list_inner.html']]
         all_files.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
         
-        c, t1, t2 = self.ui_color.text().strip(), self.ui_title.text().strip(), self.ui_subtitle.text().strip()
+        c, t1, t2, cp = self.ui_color.text().strip(), self.ui_title.text().strip(), self.ui_subtitle.text().strip(), self.ui_copy.text().strip()
         try: r_sec = int(self.ui_freq.text()) * 60
         except: r_sec = 600
+        last_sync = time.strftime("%H:%M:%S")
 
         items_html = ""
         for f in all_files[:100]:
@@ -149,45 +152,48 @@ class OutlookMHTMaster(QWidget):
                 sk = (" ".join(eps) + " " + f + " " + txt).replace("'", "").replace('"', '')
             except: tags, sk = "", f.lower()
             
-            # --- 列表样式：字体增大 ---
             items_html += f'''<div class="item" onclick="selectItem(this, '{safe_f}')" data-s="{sk[:5000]}">
                 <div class="ti">{f[:28]}...</div><div class="tr">{tags}</div>
                 <div class="tm">{time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))}</div></div>'''
 
         list_html = f"""<html><head><meta charset='utf-8'><meta http-equiv="refresh" content="{r_sec}"><style>
-            body {{ margin:0; padding:0; font-family:sans-serif; overflow-x:hidden; background:#fff; }}
-            .sb {{ position:sticky; top:0; background:#fff; padding:12px; border-bottom:1px solid #eee; z-index:9; }}
-            .sb input {{ width:100%; padding:10px; border:1px solid #ddd; border-radius:4px; font-size:14px; outline:none; box-sizing:border-box; }}
-            .item {{ padding:15px; border-bottom:1px solid #f2f2f2; cursor:pointer; border-left:5px solid transparent; transition:0.1s; }}
+            body {{ margin:0; padding:0; font-family:sans-serif; background:#fff; }}
+            .sb {{ position:sticky; top:0; background:#fff; padding:10px; border-bottom:1px solid #eee; z-index:9; }}
+            .sb input {{ width:100%; padding:8px; border:1px solid #ddd; border-radius:4px; font-size:12px; outline:none; box-sizing:border-box; }}
+            .item {{ padding:12px 15px; border-bottom:1px solid #f2f2f2; cursor:pointer; border-left:4px solid transparent; }}
             .active {{ background:#f0f7f0 !important; border-left-color:{c} !important; font-weight:bold; }}
-            .ti {{ font-size:15px; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-            .et {{ color:white; padding:2px 5px; border-radius:3px; font-size:11px; margin-right:4px; font-family:Consolas; }}
-            .tm {{ font-size:12px; color:#999; margin-top:6px; }}
-            ::-webkit-scrollbar {{ width:5px; }} ::-webkit-scrollbar-thumb {{ background:#ddd; }}
+            .ti {{ font-size:13px; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+            .et {{ color:white; padding:1px 4px; border-radius:3px; font-size:10px; margin-right:4px; font-family:Consolas; }}
+            .tm {{ font-size:11px; color:#999; margin-top:4px; }}
+            ::-webkit-scrollbar {{ width:4px; }} ::-webkit-scrollbar-thumb {{ background:#ddd; }}
         </style><script>
             function doSearch(k) {{ var its=document.querySelectorAll('.item'); k=k.toLowerCase(); its.forEach(i=>{{ i.style.display=i.getAttribute('data-s').includes(k)?'block':'none'; }}); }}
             function selectItem(el, u) {{ 
                 document.querySelectorAll('.item').forEach(i=>i.classList.remove('active')); 
                 el.classList.add('active'); 
-                if(window.parent && window.parent.loadMail) {{ window.parent.loadMail(u); }}
+                if(window.parent) {{ window.parent.loadMail(u); }}
             }}
-        </script></head><body><div class="sb"><input placeholder="全文搜索标题或内容..." oninput="doSearch(this.value)"></div>{items_html}</body></html>"""
+        </script></head><body><div class="sb"><input placeholder="搜 EP 号或正文..." oninput="doSearch(this.value)"></div>{items_html}</body></html>"""
 
         main_ui = f"""<!DOCTYPE html><html><head><meta charset='utf-8'><title>{t1}</title><style>
             * {{ margin:0!important; padding:0!important; box-sizing:border-box!important; }}
             html, body {{ width:100%; height:100%; overflow:hidden; background:#fff; }}
             .layout {{ display:flex; width:100vw; height:100vh; }}
-            .side {{ width:300px; height:100%; display:flex; flex-direction:column; border-right:1px solid #eee; flex-shrink:0; }}
-            .hd {{ background:{c}; color:white; padding:20px 15px; border:none; }}
-            .brand {{ font-size:20px; font-weight:bold; display:block; }}
-            .sub-brand {{ font-size:12px; opacity:0.8; margin-top:6px; display:block; }}
-            .st {{ font-size:11px; opacity:0.6; margin-top:12px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.2); }}
+            .side {{ width:280px; height:100%; display:flex; flex-direction:column; border-right:1px solid #eee; flex-shrink:0; }}
+            .hd {{ background:{c}; color:white; padding:15px; border:none; }}
+            .brand {{ font-size:18px; font-weight:bold; display:block; }}
+            .sub-brand {{ font-size:11px; opacity:0.8; margin-top:5px; display:block; }}
+            .st {{ font-size:10px; opacity:0.6; margin-top:10px; padding-top:5px; border-top:1px solid rgba(255,255,255,0.2); }}
             iframe {{ border:none!important; width:100%; height:100%; display:block; background:#fff; }}
         </style><script>
             function loadMail(u) {{ var vf = document.getElementById('vf'); if(vf) {{ vf.src = u; }} }}
         </script></head>
         <body><div class="layout">
-            <div class="side"><div class="hd"><span class="brand">{t1}</span><span class="sub-brand">{t2}</span><div class="st">● 活跃(9-12点) | 同步时间: {time.strftime('%H:%M:%S')}</div></div>
+            <div class="side"><div class="hd">
+                <span class="brand">{t1}</span>
+                <span class="sub-brand">{t2}</span>
+                <div class="st">同步时间: {last_sync}<br>{cp}</div>
+            </div>
             <iframe src="list_inner.html"></iframe></div>
             <div style="flex:1;"><iframe id="vf" name="vf" src="about:blank"></iframe></div>
         </div></body></html>"""
