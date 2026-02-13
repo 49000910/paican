@@ -1,6 +1,6 @@
 import sys, os, re, time, subprocess, tempfile, urllib.parse, base64, email
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QLineEdit, QPushButton, QTextEdit, QSystemTrayIcon, QMenu, QComboBox)
+                             QLabel, QLineEdit, QPushButton, QTextEdit, QSystemTrayIcon, QMenu)
 from PyQt5.QtCore import QTimer, Qt
 
 class OutlookMHTMaster(QWidget):
@@ -10,22 +10,13 @@ class OutlookMHTMaster(QWidget):
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.interval_min = 10     
-        self.sys_title = "RD Team 邮件看板"
+        self.sync_count = 1       
+        self.start_hour = 8       
+        self.end_hour = 20        
+        self.theme_color = "#107c10" 
         self.copyright_text = "© 2024-2026 RD Team | 视频组技术支持"
         
-        # --- 颜色方案 ---
-        self.themes = {
-            "默认科技蓝": "#0078d4",
-            "生产安全绿": "#107c10",
-            "商务极客黑": "#201f1e",
-            "警告活力橙": "#d83b01",
-            "自定义颜色": "CUSTOM"
-        }
-        self.current_theme_color = "#0078d4"
-        
-        self.tmp_log = os.path.join(tempfile.gettempdir(), "sync_v22_res.txt")
-        self.last_sync_time = "尚未同步"
-        
+        self.tmp_log = os.path.join(tempfile.gettempdir(), "sync_v26_res.txt")
         self.init_ui()
         self.init_tray()
         
@@ -34,181 +25,153 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("RD 邮件助手 V22.0 (全界面联动换色版)")
-        self.resize(600, 750)
-        self.main_layout = QVBoxLayout()
-        
-        # 配置表单
-        form = QVBoxLayout()
-        self.edit_path = QLineEdit(self.share_dir); form.addWidget(QLabel("📂 共享网络路径 (UNC):")); form.addWidget(self.edit_path)
+        self.setWindowTitle("RD Sync Tool V26.0")
+        self.resize(480, 680)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # 极简后台配置项
+        def quick_edit(label, val, attr):
+            l = QHBoxLayout()
+            l.addWidget(QLabel(label))
+            edit = QLineEdit(str(val)); setattr(self, attr, edit)
+            l.addWidget(edit); layout.addLayout(l)
+
+        quick_edit("📂 共享路径", self.share_dir, "ui_path")
+        quick_edit("📧 关键词", self.target_kw, "ui_kw")
         
         h1 = QHBoxLayout()
-        self.edit_kw = QLineEdit(self.target_kw); h1.addWidget(QLabel("📧 关键词:")); h1.addWidget(self.edit_kw)
-        self.edit_freq = QLineEdit(str(self.interval_min)); h1.addWidget(QLabel("⏱ 间隔(分):")); h1.addWidget(self.edit_freq)
-        form.addLayout(h1)
-        
+        h1.addWidget(QLabel("⏱ 频率(分)"))
+        self.ui_freq = QLineEdit(str(self.interval_min)); h1.addWidget(self.ui_freq)
+        h1.addWidget(QLabel("🔢 数量"))
+        self.ui_count = QLineEdit(str(self.sync_count)); h1.addWidget(self.ui_count)
+        layout.addLayout(h1)
+
         h2 = QHBoxLayout()
-        self.edit_title = QLineEdit(self.sys_title); h2.addWidget(QLabel("🏷️ 网页标题:")); h2.addWidget(self.edit_title)
-        self.combo_theme = QComboBox(); self.combo_theme.addItems(self.themes.keys())
-        h2.addWidget(QLabel("🎨 预设主题:")); h2.addWidget(self.combo_theme)
-        form.addLayout(h2)
+        h2.addWidget(QLabel("⏰ 开始时")); self.ui_start = QLineEdit(str(self.start_hour)); h2.addWidget(self.ui_start)
+        h2.addWidget(QLabel("⏰ 结束时")); self.ui_end = QLineEdit(str(self.end_hour)); h2.addWidget(self.ui_end)
+        layout.addLayout(h2)
 
-        h3 = QHBoxLayout()
-        self.edit_custom_color = QLineEdit(self.current_theme_color)
-        h3.addWidget(QLabel("🌈 HEX 颜色代码:")); h3.addWidget(self.edit_custom_color)
-        form.addLayout(h3)
+        quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
+        quick_edit("📝 版权内容", self.copyright_text, "ui_copy")
 
-        self.edit_copy = QLineEdit(self.copyright_text); form.addWidget(QLabel("📝 版权信息:")); form.addWidget(self.edit_copy)
-        self.main_layout.addLayout(form)
+        self.btn_apply = QPushButton("🚀 部署并同步 (网页已加框)")
+        self.btn_apply.setFixedHeight(45); self.btn_apply.clicked.connect(self.apply_settings)
+        layout.addWidget(self.btn_apply)
 
-        # 同步按钮
-        self.btn_apply = QPushButton("🚀 保存配置并应用视觉主题")
-        self.btn_apply.setFixedHeight(50)
-        self.btn_apply.clicked.connect(self.apply_settings)
-        self.main_layout.addWidget(self.btn_apply)
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        layout.addWidget(self.log); self.setLayout(layout); self.restyle()
 
-        # 日志区
-        self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
-        self.main_layout.addWidget(self.log_area)
-        
-        self.setLayout(self.main_layout)
-        self.update_app_style() # 初始化样式
+    def restyle(self):
+        c = self.ui_color.text().strip()
+        if not c.startswith("#"): c = "#107c10"
+        self.setStyleSheet(f"QPushButton{{background:{c};color:white;font-weight:bold;border-radius:4px;}} QTextEdit{{background:#1e1e1e;color:#0f0;border:1px solid {c};font-family:Consolas;}}")
 
-    def update_app_style(self):
-        """核心：动态更新后台界面的 QSS 样式"""
-        c = self.current_theme_color
-        # 确保颜色以 # 开头
-        if not c.startswith("#"): c = "#0078d4"
-        
-        qss = f"""
-            QWidget {{ background-color: #f5f5f5; font-family: 'Microsoft YaHei'; }}
-            QLabel {{ color: #333; font-weight: bold; }}
-            QLineEdit {{ padding: 6px; border: 2px solid #ddd; border-radius: 4px; background: white; }}
-            QLineEdit:focus {{ border-color: {c}; }}
-            QPushButton {{ background-color: {c}; color: white; border-radius: 6px; font-size: 14px; font-weight: bold; border: none; }}
-            QPushButton:hover {{ background-color: {c}cc; }}
-            QTextEdit {{ background-color: #1e1e1e; color: #00ff00; border: 3px solid {c}; border-radius: 5px; font-family: 'Consolas'; }}
-            QComboBox {{ padding: 5px; border: 2px solid #ddd; border-radius: 4px; }}
-        """
-        self.setStyleSheet(qss)
-
-    def init_tray(self):
-        self.tray = QSystemTrayIcon(self); self.tray.setIcon(self.style().standardIcon(21))
-        m = QMenu(); m.addAction("显示", self.showNormal); m.addAction("退出", QApplication.instance().quit)
-        self.tray.setContextMenu(m); self.tray.show()
-
-    def add_log(self, text):
-        clean_msg = str(text).replace('\x00', '')
-        self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {clean_msg}")
+    def add_log(self, txt):
+        self.log.append(f"[{time.strftime('%H:%M:%S')}] {str(txt).replace('\x00','')}")
 
     def apply_settings(self):
-        self.share_dir, self.target_kw = self.edit_path.text().strip(), self.edit_kw.text().strip()
-        self.sys_title, self.copyright_text = self.edit_title.text().strip(), self.edit_copy.text().strip()
-        
-        # 识别颜色
-        tk = self.combo_theme.currentText()
-        if self.themes[tk] == "CUSTOM":
-            self.current_theme_color = self.edit_custom_color.text().strip()
-        else:
-            self.current_theme_color = self.themes[tk]
-            self.edit_custom_color.setText(self.current_theme_color)
-        
-        try:
-            self.interval_min = int(self.edit_freq.text())
-            self.update_app_style() # 即时更新后台颜色
-            self.add_log(f"🎨 主题已切换为: {self.current_theme_color}")
-            self.run_cycle()
-        except: self.add_log("❌ 数值错误")
+        self.share_dir, self.target_kw = self.ui_path.text().strip(), self.ui_kw.text().strip()
+        self.restyle(); self.add_log("⚙️ 配置生效..."); self.run_cycle()
 
     def run_cycle(self):
-        self.run_shell_logic()
-        self.last_sync_time = time.strftime('%Y-%m-%d %H:%M:%S')
-        self.sync_timer.start(self.interval_min * 60000)
+        now_h = int(time.strftime("%H"))
+        if not (int(self.ui_start.text()) <= now_h < int(self.ui_end.text())):
+            self.add_log(f"💤 休眠中 ({now_h}点)"); self.sync_timer.start(30 * 60000); return
+        self.run_shell(); self.sync_timer.start(int(self.ui_freq.text()) * 60000)
 
-    def run_shell_logic(self):
+    def run_shell(self):
         ps_dir = self.share_dir.replace('"', '""'); ps_kw = self.target_kw.replace('"', '""'); ps_tmp = self.tmp_log.replace('"', '""')
-        ps_script = f"""
+        count = self.ui_count.text().strip()
+        ps_cmd = f"""
         try {{
             if (!(Test-Path "{ps_dir}")) {{ New-Item -ItemType Directory -Path "{ps_dir}" -Force | Out-Null }}
             $ol = New-Object -ComObject Outlook.Application
-            $ns = $ol.GetNamespace("MAPI")
-            $it = $ns.GetDefaultFolder(6).Items | Where-Object {{ $_.ReceivedTime -gt (Get-Date).AddDays(-3) -and ($_.Subject -like "*{ps_kw}*" -or $_.SenderName -like "*{ps_kw}*") }} | Sort-Object ReceivedTime -Descending | Select-Object -First 1
-            if ($it) {{
-                $n = $it.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_'
-                $p = Join-Path "{ps_dir}" "$($n.Trim()).mht"
-                if (!(Test-Path $p)) {{ $it.SaveAs($p, 10); "SUCCESS|$n" | Out-File "{ps_tmp}" -Encoding utf8 }}
-                else {{ "EXISTS" | Out-File "{ps_tmp}" -Encoding utf8 }}
-            }} else {{ "NOTFOUND" | Out-File "{ps_tmp}" -Encoding utf8 }}
-        }} catch {{ "ERROR|$($_.Exception.Message)" | Out-File "{ps_tmp}" -Encoding utf8 }} finally {{ if ($ol) {{ [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ol) | Out-Null }} }}
+            $it = $ol.GetNamespace("MAPI").GetDefaultFolder(6).Items | Where-Object {{ $_.ReceivedTime -gt (Get-Date).AddDays(-3) -and ($_.Subject -like "*{ps_kw}*" -or $_.SenderName -like "*{ps_kw}*") }} | Sort-Object ReceivedTime -Descending | Select-Object -First {count}
+            if ($it) {{ foreach($m in $it) {{ $n = ($m.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_').Trim(); $p = Join-Path "{ps_dir}" "$n.mht"; if (!(Test-Path $p)) {{ $m.SaveAs($p, 10) }} }} }}
+        }} catch {{ "ERR|$($_.Exception.Message)" | Out-File "{ps_tmp}" -Encoding utf8 }} finally {{ if ($ol) {{ [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ol) | Out-Null }} }}
         """
         try:
-            ps_b64 = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
+            ps_b64 = base64.b64encode(ps_cmd.encode('utf-16-le')).decode('ascii')
             subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", ps_b64], creationflags=0x08000000, timeout=60)
-            self.convert_and_index()
-        except Exception as e: self.add_log(f"同步异常: {e}")
+            self.process_web()
+        except Exception as e: self.add_log(f"ERR: {e}")
 
-    def convert_and_index(self):
+    def process_web(self):
         if not os.path.exists(self.share_dir): return
-        mht_files = [f for f in os.listdir(self.share_dir) if f.endswith('.mht')]
-        items_html = ""
-        for f in mht_files:
-            mht_p, h_n = os.path.join(self.share_dir, f), f.replace('.mht', '.static.html')
-            h_p = os.path.join(self.share_dir, h_n)
-            mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(mht_p)))
-            ep_list, mail_body = [], ""
+        mhts = [f for f in os.listdir(self.share_dir) if f.endswith('.mht')]
+        for f in mhts:
+            p_m = os.path.join(self.share_dir, f); p_h = os.path.join(self.share_dir, f.replace('.mht', '.html'))
             try:
-                with open(mht_p, 'rb') as fp:
+                with open(p_m, 'rb') as fp:
                     msg = email.message_from_binary_file(fp)
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
-                            payload = part.get_payload(decode=True)
-                            for enc in ['utf-8', 'gbk', 'gb18030']:
-                                try:
-                                    mail_body = payload.decode(enc)
-                                    plain = re.sub('<[^<]+?>', '', mail_body)
-                                    ep_list = list(set(re.findall(r'\bEP[A-Z0-9]{9}\b', plain, re.I)))
-                                    break
-                                except: continue
-                if mail_body and not os.path.exists(h_p):
-                    with open(h_p, 'w', encoding='utf-8') as hw: hw.write(mail_body)
+                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(part.get_payload(decode=True).decode('utf-8','ignore'))
+                            break
+                os.remove(p_m); self.add_log(f"✅ Sync: {f}")
             except: pass
-            tags = "".join([f'<span class="tag">{c}</span>' for c in ep_list[:3]])
-            safe_f = urllib.parse.quote(h_n)
-            sk = (f + " " + " ".join(ep_list)).lower()
-            items_html += f'<div class="item" onclick="v(this,\'{safe_f}\')" data-s="{sk}"><b>{f[:45]}</b>{tags}<span class="time">🕒 {mt}</span></div>'
+        self.build_index()
 
-        full_html = f"""
-        <!DOCTYPE html><html><head><meta charset='utf-8'><title>{self.sys_title}</title>
+    def build_index(self):
+        files = [f for f in os.listdir(self.share_dir) if f.endswith('.html') and f != 'index.html']
+        files.sort(key=lambda x: os.path.getmtime(os.path.join(self.share_dir, x)), reverse=True)
+        c = self.ui_color.text().strip()
+        items = ""
+        for f in files:
+            p = os.path.join(self.share_dir, f)
+            mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+            ep = list(set(re.findall(r'\bEP[A-Z0-9]{9}\b', open(p, 'r', encoding='utf-8', errors='ignore').read(5000), re.I)))
+            tags = "".join([f'<span style="background:{c};color:white;padding:2px 5px;border-radius:3px;font-size:10px;margin-right:5px;">{x}</span>' for x in ep[:2]])
+            items += f'<div class="item" onclick="v(this,\'{urllib.parse.quote(f)}\')" data-s="{(f+str(ep)).lower()}"><b>{f[:35]}...</b><br>{tags}<br><span class="time">{mt}</span></div>'
+
+        # 网页 UI：核心增加了容器边框布局
+        web_ui = f"""
+        <!DOCTYPE html><html><head><meta charset='utf-8'>
         <style>
-            :root {{ --main: {self.current_theme_color}; }}
-            body {{ margin:0; display:flex; height:100vh; font-family:'Segoe UI',sans-serif; overflow:hidden; background:#f4f4f4; }}
-            .sidebar {{ width:340px; border-right:1px solid #ddd; display:flex; flex-direction:column; background:#fff; }}
-            .header {{ background: var(--main); color:white; padding:15px; }}
-            .search-box {{ padding:10px; border-bottom:1px solid #eee; }}
-            .search-box input {{ width:100%; padding:8px; border:1px solid #ccc; border-radius:4px; outline:none; }}
-            .list {{ flex:1; overflow-y:auto; }}
-            .item {{ padding:12px; border-bottom:1px solid #eee; cursor:pointer; }}
-            .item:hover {{ background:#f9f9f9; }}
-            .item.active {{ background:#eff6fc; border-left:5px solid var(--main); }}
-            .tag {{ background: var(--main); color:white; padding:1px 4px; border-radius:3px; font-size:10px; margin-right:5px; }}
-            .time {{ font-size:11px; color:#999; display:block; margin-top:5px; }}
-            iframe {{ width:100%; height:100%; border:none; background:#fff; }}
+            :root {{ --main: {c}; }}
+            body {{ 
+                margin: 0; padding: 12px; background: #e9e9e9; height: 100vh; 
+                display: flex; box-sizing: border-box; font-family: 'Segoe UI', sans-serif;
+            }}
+            .app-container {{ 
+                display: flex; width: 100%; height: 100%; background: white; 
+                border: 1px solid #ccc; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            }}
+            .sidebar {{ width: 320px; border-right: 1px solid #eee; display: flex; flex-direction: column; background: #fff; }}
+            .header {{ background: var(--main); color: white; padding: 18px; font-weight: bold; }}
+            .list {{ flex: 1; overflow-y: auto; }}
+            .item {{ padding: 15px; border-bottom: 1px solid #f9f9f9; cursor: pointer; transition: 0.2s; }}
+            .item:hover {{ background: #fcfcfc; }}
+            .item.active {{ background: #f0f7ff; border-left: 5px solid var(--main); }}
+            .item b {{ font-size: 13px; color: #333; }}
+            .time {{ font-size: 11px; color: #999; display: block; margin-top: 5px; }}
+            .preview {{ flex: 1; background: #fff; display: flex; flex-direction: column; }}
+            iframe {{ flex: 1; border: none; }}
+            .footer {{ font-size: 10px; padding: 10px; text-align: center; color: #bbb; border-top: 1px solid #eee; }}
         </style>
         <script>
             function ds(v) {{ v=v.toLowerCase(); document.querySelectorAll('.item').forEach(i=>{{ i.style.display=i.getAttribute('data-s').includes(v)?'block':'none'; }}); }}
             function v(el, url) {{ document.querySelectorAll('.item').forEach(i=>i.classList.remove('active')); el.classList.add('active'); document.getElementById('f').src=url; }}
         </script></head>
         <body>
-            <div class="sidebar">
-                <div class="header"><b>{self.sys_title}</b><br><small style="font-size:10px;">最后更新: {self.last_sync_time}</small></div>
-                <div class="search-box"><input onkeyup="ds(this.value)" placeholder="🔍 搜任务令或标题..."></div>
-                <div class="list">{items_html}</div>
+            <div class="app-container">
+                <div class="sidebar">
+                    <div class="header">📫 RD 邮件分发看板</div>
+                    <div style="padding:10px;"><input onkeyup="ds(this.value)" placeholder="🔍 搜索单号或标题..." style="width:100%;padding:8px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px;"></div>
+                    <div class="list">{items}</div>
+                    <div class="footer">{self.ui_copy.text()}</div>
+                </div>
+                <div class="preview"><iframe id="f"></iframe></div>
             </div>
-            <div style="flex:1;"><iframe id="f"></iframe></div>
         </body></html>
         """
-        with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as f_idx: f_idx.write(full_html)
-        self.add_log(f"🚀 全界面视觉主题 [{self.current_theme_color}] 部署成功")
+        with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as fx: fx.write(web_ui)
+        self.add_log("📊 网页边框 UI 已更新部署")
+
+    def init_tray(self):
+        self.tray = QSystemTrayIcon(self); self.tray.setIcon(self.style().standardIcon(21))
+        m = QMenu(); m.addAction("Show", self.showNormal); m.addAction("Exit", QApplication.instance().quit); self.tray.setContextMenu(m); self.tray.show()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); ex = OutlookMHTMaster(); ex.show(); sys.exit(app.exec_())
