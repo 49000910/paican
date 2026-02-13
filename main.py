@@ -25,7 +25,7 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("RD Sync Tool V26.0")
+        self.setWindowTitle("RD Sync Tool V26.1")
         self.resize(480, 680)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
@@ -33,7 +33,7 @@ class OutlookMHTMaster(QWidget):
         # 极简后台配置项
         def quick_edit(label, val, attr):
             l = QHBoxLayout()
-            l.addWidget(QLabel(label))
+            lb = QLabel(label); lb.setFixedWidth(100); l.addWidget(lb)
             edit = QLineEdit(str(val)); setattr(self, attr, edit)
             l.addWidget(edit); layout.addLayout(l)
 
@@ -59,8 +59,8 @@ class OutlookMHTMaster(QWidget):
         self.btn_apply.setFixedHeight(45); self.btn_apply.clicked.connect(self.apply_settings)
         layout.addWidget(self.btn_apply)
 
-        self.log = QTextEdit(); self.log.setReadOnly(True)
-        layout.addWidget(self.log); self.setLayout(layout); self.restyle()
+        self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
+        layout.addWidget(self.log_area); self.setLayout(layout); self.restyle()
 
     def restyle(self):
         c = self.ui_color.text().strip()
@@ -68,21 +68,35 @@ class OutlookMHTMaster(QWidget):
         self.setStyleSheet(f"QPushButton{{background:{c};color:white;font-weight:bold;border-radius:4px;}} QTextEdit{{background:#1e1e1e;color:#0f0;border:1px solid {c};font-family:Consolas;}}")
 
     def add_log(self, txt):
-        self.log.append(f"[{time.strftime('%H:%M:%S')}] {str(txt).replace('\x00','')}")
+        # --- 核心修复：抽离反斜杠逻辑，解决 SyntaxError ---
+        t_str = time.strftime('%H:%M:%S')
+        safe_msg = str(txt).replace('\x00', '')
+        self.log_area.append(f"[{t_str}] {safe_msg}")
 
     def apply_settings(self):
-        self.share_dir, self.target_kw = self.ui_path.text().strip(), self.ui_kw.text().strip()
+        self.share_dir = self.ui_path.text().strip()
+        self.target_kw = self.ui_kw.text().strip()
         self.restyle(); self.add_log("⚙️ 配置生效..."); self.run_cycle()
 
     def run_cycle(self):
         now_h = int(time.strftime("%H"))
-        if not (int(self.ui_start.text()) <= now_h < int(self.ui_end.text())):
+        try:
+            s_h, e_h = int(self.ui_start.text()), int(self.ui_end.text())
+        except: s_h, e_h = 8, 20
+        
+        if not (s_h <= now_h < e_h):
             self.add_log(f"💤 休眠中 ({now_h}点)"); self.sync_timer.start(30 * 60000); return
-        self.run_shell(); self.sync_timer.start(int(self.ui_freq.text()) * 60000)
+        
+        self.run_shell(); 
+        try: freq = int(self.ui_freq.text())
+        except: freq = 10
+        self.sync_timer.start(freq * 60000)
 
     def run_shell(self):
         ps_dir = self.share_dir.replace('"', '""'); ps_kw = self.target_kw.replace('"', '""'); ps_tmp = self.tmp_log.replace('"', '""')
-        count = self.ui_count.text().strip()
+        try: count = int(self.ui_count.text())
+        except: count = 1
+        
         ps_cmd = f"""
         try {{
             if (!(Test-Path "{ps_dir}")) {{ New-Item -ItemType Directory -Path "{ps_dir}" -Force | Out-Null }}
@@ -107,7 +121,8 @@ class OutlookMHTMaster(QWidget):
                     msg = email.message_from_binary_file(fp)
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
-                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(part.get_payload(decode=True).decode('utf-8','ignore'))
+                            payload = part.get_payload(decode=True)
+                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(payload.decode('utf-8','ignore'))
                             break
                 os.remove(p_m); self.add_log(f"✅ Sync: {f}")
             except: pass
@@ -117,57 +132,51 @@ class OutlookMHTMaster(QWidget):
         files = [f for f in os.listdir(self.share_dir) if f.endswith('.html') and f != 'index.html']
         files.sort(key=lambda x: os.path.getmtime(os.path.join(self.share_dir, x)), reverse=True)
         c = self.ui_color.text().strip()
+        if not c.startswith("#"): c = "#107c10"
         items = ""
         for f in files:
             p = os.path.join(self.share_dir, f)
             mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
             ep = list(set(re.findall(r'\bEP[A-Z0-9]{9}\b', open(p, 'r', encoding='utf-8', errors='ignore').read(5000), re.I)))
-            tags = "".join([f'<span style="background:{c};color:white;padding:2px 5px;border-radius:3px;font-size:10px;margin-right:5px;">{x}</span>' for x in ep[:2]])
+            tags = "".join([f'<span style="background:{c};color:white;padding:2px 5px;border-radius:3px;font-size:10px;margin-right:5px;font-family:Consolas;">{x}</span>' for x in ep[:2]])
             items += f'<div class="item" onclick="v(this,\'{urllib.parse.quote(f)}\')" data-s="{(f+str(ep)).lower()}"><b>{f[:35]}...</b><br>{tags}<br><span class="time">{mt}</span></div>'
 
-        # 网页 UI：核心增加了容器边框布局
         web_ui = f"""
         <!DOCTYPE html><html><head><meta charset='utf-8'>
         <style>
             :root {{ --main: {c}; }}
-            body {{ 
-                margin: 0; padding: 12px; background: #e9e9e9; height: 100vh; 
-                display: flex; box-sizing: border-box; font-family: 'Segoe UI', sans-serif;
-            }}
-            .app-container {{ 
-                display: flex; width: 100%; height: 100%; background: white; 
-                border: 1px solid #ccc; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            }}
-            .sidebar {{ width: 320px; border-right: 1px solid #eee; display: flex; flex-direction: column; background: #fff; }}
-            .header {{ background: var(--main); color: white; padding: 18px; font-weight: bold; }}
+            body {{ margin: 0; padding: 15px; background: #ddd; height: 100vh; display: flex; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }}
+            .app {{ display: flex; width: 100%; height: 100%; background: white; border: 1px solid #aaa; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,0.15); }}
+            .side {{ width: 330px; border-right: 1px solid #eee; display: flex; flex-direction: column; background: #fff; flex-shrink: 0; }}
+            .head {{ background: var(--main); color: white; padding: 18px; font-weight: bold; font-size: 16px; }}
             .list {{ flex: 1; overflow-y: auto; }}
-            .item {{ padding: 15px; border-bottom: 1px solid #f9f9f9; cursor: pointer; transition: 0.2s; }}
-            .item:hover {{ background: #fcfcfc; }}
-            .item.active {{ background: #f0f7ff; border-left: 5px solid var(--main); }}
-            .item b {{ font-size: 13px; color: #333; }}
+            .item {{ padding: 15px; border-bottom: 1px solid #f5f5f5; cursor: pointer; }}
+            .item:hover {{ background: #fafafa; }}
+            .item.active {{ background: #eff6fc; border-left: 5px solid var(--main); }}
             .time {{ font-size: 11px; color: #999; display: block; margin-top: 5px; }}
-            .preview {{ flex: 1; background: #fff; display: flex; flex-direction: column; }}
-            iframe {{ flex: 1; border: none; }}
-            .footer {{ font-size: 10px; padding: 10px; text-align: center; color: #bbb; border-top: 1px solid #eee; }}
+            .foot {{ font-size: 10px; padding: 12px; text-align: center; color: #aaa; border-top: 1px solid #eee; background: #fcfcfc; }}
+            .view {{ flex: 1; position: relative; background: #fff; }}
+            iframe {{ width: 100%; height: 100%; border: none; }}
         </style>
         <script>
             function ds(v) {{ v=v.toLowerCase(); document.querySelectorAll('.item').forEach(i=>{{ i.style.display=i.getAttribute('data-s').includes(v)?'block':'none'; }}); }}
             function v(el, url) {{ document.querySelectorAll('.item').forEach(i=>i.classList.remove('active')); el.classList.add('active'); document.getElementById('f').src=url; }}
         </script></head>
         <body>
-            <div class="app-container">
-                <div class="sidebar">
-                    <div class="header">📫 RD 邮件分发看板</div>
-                    <div style="padding:10px;"><input onkeyup="ds(this.value)" placeholder="🔍 搜索单号或标题..." style="width:100%;padding:8px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px;"></div>
+            <div class="app">
+                <div class="side">
+                    <div class="head">📫 RD 邮件看板 Pro</div>
+                    <div style="padding:10px;"><input onkeyup="ds(this.value)" placeholder="🔍 搜任务令或标题..." style="width:100%;padding:8px;box-sizing:border-box;border:1px solid #ddd;border-radius:4px;"></div>
                     <div class="list">{items}</div>
-                    <div class="footer">{self.ui_copy.text()}</div>
+                    <div class="foot">{self.ui_copy.text()}</div>
                 </div>
-                <div class="preview"><iframe id="f"></iframe></div>
+                <div class="view"><iframe id="f"></iframe></div>
             </div>
         </body></html>
         """
-        with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as fx: fx.write(web_ui)
-        self.add_log("📊 网页边框 UI 已更新部署")
+        try:
+            with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as fx: fx.write(web_ui)
+        except: pass
 
     def init_tray(self):
         self.tray = QSystemTrayIcon(self); self.tray.setIcon(self.style().standardIcon(21))
