@@ -1,8 +1,10 @@
 import sys, os, re, time, subprocess, tempfile, urllib.parse, base64, email
+# 修正点：将 QStyle 移至 QtWidgets 导入
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QLineEdit, QPushButton, QTextEdit, QSystemTrayIcon, QMenu, QAction)
+                             QLabel, QLineEdit, QPushButton, QTextEdit, 
+                             QSystemTrayIcon, QMenu, QAction, QStyle)
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QStyle
+from PyQt5.QtGui import QIcon # QStyle 不在这里，已移走
 
 class OutlookMHTMaster(QWidget):
     def __init__(self):
@@ -25,7 +27,7 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 排产看板管理后台 V26.9")
+        self.setWindowTitle("EDFA 排产看板管理后台 V26.9.1")
         self.resize(500, 750)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
@@ -63,6 +65,7 @@ class OutlookMHTMaster(QWidget):
 
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
+        # 修正点：使用 self.style().standardIcon 调用 QStyle
         self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
         tm = QMenu(); tm.addAction("显示主界面", self.showNormal); tm.addAction("退出程序", QApplication.instance().quit)
         self.tray.setContextMenu(tm); self.tray.show()
@@ -142,7 +145,6 @@ class OutlookMHTMaster(QWidget):
                 eps = list(set(re.findall(r'\bEP[A-Z0-9]{9}\b', raw_h, re.I)))
                 tags = "".join([f'<span class="et" style="background:{c}">{x}</span>' for x in eps[:2]])
                 txt = re.sub(r'<[^>]+>', '', raw_h).replace('\\n',' ').lower()
-                # 索引包含：EP号 + 文件名 + 正文文本
                 sk = (" ".join(eps) + " " + f + " " + txt).replace("'", "").replace('"', '')
             except: tags, sk = "", f.lower()
             
@@ -165,14 +167,15 @@ class OutlookMHTMaster(QWidget):
             function selectItem(el, u) {{ document.querySelectorAll('.item').forEach(i=>i.classList.remove('active')); el.classList.add('active'); parent.loadMail(u); }}
         </script></head><body><div class="sb"><input placeholder="搜 EP 号或正文..." oninput="doSearch(this.value)"></div>{items_html}</body></html>"""
 
+        # 主页面 CSS 加入暴力清除，确保全屏无框
         main_ui = f"""<!DOCTYPE html><html><head><meta charset='utf-8'><title>{t1}</title><style>
             * {{ margin:0!important; padding:0!important; box-sizing:border-box!important; }}
             html, body {{ width:100%; height:100%; overflow:hidden; background:#fff; }}
             .layout {{ display:flex; width:100vw; height:100vh; }}
             .side {{ width:280px; height:100%; display:flex; flex-direction:column; border-right:1px solid #eee; flex-shrink:0; }}
-            .hd {{ background:{c}; color:white; padding:18px 15px; }}
-            .brand {{ font-size:18px; font-weight:bold; }}
-            .sub-brand {{ font-size:11px; opacity:0.8; margin-top:5px; }}
+            .hd {{ background:{c}; color:white; padding:18px 15px; border:none; }}
+            .brand {{ font-size:18px; font-weight:bold; display:block; }}
+            .sub-brand {{ font-size:11px; opacity:0.8; margin-top:5px; display:block; }}
             iframe {{ border:none!important; width:100%; height:100%; display:block; }}
         </style><script>function loadMail(u) {{ document.getElementById('vf').src = u; }}</script></head>
         <body><div class="layout">
@@ -185,4 +188,7 @@ class OutlookMHTMaster(QWidget):
         with open(os.path.join(d, 'index.html'), 'w', encoding='utf-8') as f2: f2.write(main_ui)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv); w = OutlookMHTMaster(); w.show(); sys.exit(app.exec_())
+    app = QApplication(sys.argv)
+    w = OutlookMHTMaster()
+    w.show()
+    sys.exit(app.exec_())
