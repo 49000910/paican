@@ -25,12 +25,11 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("RD Sync Tool V26.1")
+        self.setWindowTitle("RD Sync Tool V26.2")
         self.resize(480, 680)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
 
-        # 极简后台配置项
         def quick_edit(label, val, attr):
             l = QHBoxLayout()
             lb = QLabel(label); lb.setFixedWidth(100); l.addWidget(lb)
@@ -55,7 +54,7 @@ class OutlookMHTMaster(QWidget):
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("📝 版权内容", self.copyright_text, "ui_copy")
 
-        self.btn_apply = QPushButton("🚀 部署并同步 (网页已加框)")
+        self.btn_apply = QPushButton("🚀 部署并同步 (网页同步刷新)")
         self.btn_apply.setFixedHeight(45); self.btn_apply.clicked.connect(self.apply_settings)
         layout.addWidget(self.btn_apply)
 
@@ -68,7 +67,6 @@ class OutlookMHTMaster(QWidget):
         self.setStyleSheet(f"QPushButton{{background:{c};color:white;font-weight:bold;border-radius:4px;}} QTextEdit{{background:#1e1e1e;color:#0f0;border:1px solid {c};font-family:Consolas;}}")
 
     def add_log(self, txt):
-        # --- 核心修复：抽离反斜杠逻辑，解决 SyntaxError ---
         t_str = time.strftime('%H:%M:%S')
         safe_msg = str(txt).replace('\x00', '')
         self.log_area.append(f"[{t_str}] {safe_msg}")
@@ -83,10 +81,8 @@ class OutlookMHTMaster(QWidget):
         try:
             s_h, e_h = int(self.ui_start.text()), int(self.ui_end.text())
         except: s_h, e_h = 8, 20
-        
         if not (s_h <= now_h < e_h):
             self.add_log(f"💤 休眠中 ({now_h}点)"); self.sync_timer.start(30 * 60000); return
-        
         self.run_shell(); 
         try: freq = int(self.ui_freq.text())
         except: freq = 10
@@ -96,7 +92,6 @@ class OutlookMHTMaster(QWidget):
         ps_dir = self.share_dir.replace('"', '""'); ps_kw = self.target_kw.replace('"', '""'); ps_tmp = self.tmp_log.replace('"', '""')
         try: count = int(self.ui_count.text())
         except: count = 1
-        
         ps_cmd = f"""
         try {{
             if (!(Test-Path "{ps_dir}")) {{ New-Item -ItemType Directory -Path "{ps_dir}" -Force | Out-Null }}
@@ -134,6 +129,10 @@ class OutlookMHTMaster(QWidget):
         c = self.ui_color.text().strip()
         if not c.startswith("#"): c = "#107c10"
         items = ""
+        # 网页刷新时间 (秒)
+        try: refresh_sec = int(self.ui_freq.text()) * 60
+        except: refresh_sec = 600
+
         for f in files:
             p = os.path.join(self.share_dir, f)
             mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
@@ -143,6 +142,7 @@ class OutlookMHTMaster(QWidget):
 
         web_ui = f"""
         <!DOCTYPE html><html><head><meta charset='utf-8'>
+        <meta http-equiv="refresh" content="{refresh_sec}">
         <style>
             :root {{ --main: {c}; }}
             body {{ margin: 0; padding: 15px; background: #ddd; height: 100vh; display: flex; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }}
