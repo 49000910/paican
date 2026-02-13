@@ -6,14 +6,11 @@ from PyQt5.QtCore import QTimer, Qt
 class OutlookMHTMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 建议：先在 Windows 映射 Z 盘指向 \\10.1.93.32\DT_HU_RDteam_F ---
-        # 然后将下方路径改为 r'Z:\视频\Z\ZOUQIU\paican'
+        # 默认直接使用网络路径
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.copyright_text = "© 2024-2026 RD Team | 视频组技术支持"
         self.interval_min = 10     
-        self.start_hour = 8        
-        self.end_hour = 18         
         
         self.tmp_log = os.path.join(tempfile.gettempdir(), "outlook_sync_res.txt")
         self.init_ui()
@@ -24,75 +21,45 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("RD 邮件全自动看板 (V4.0 预览修复版)")
+        self.setWindowTitle("RD 邮件全自动看板 (V5.0 网络共享版)")
         self.resize(580, 550)
-        self.setWindowFlags(Qt.WindowStaysOnTopHint)
         layout = QVBoxLayout()
-        
-        layout.addWidget(QLabel("📂 保存目录 (推荐使用映射后的盘符如 Z:\...):"))
+        layout.addWidget(QLabel("📂 共享网络路径 (UNC):"))
         self.edit_path = QLineEdit(self.share_dir); layout.addWidget(self.edit_path)
-
         layout.addWidget(QLabel("📧 监控关键词:"))
         self.edit_kw = QLineEdit(self.target_kw); layout.addWidget(self.edit_kw)
+        
+        h_layout = QHBoxLayout()
+        h_layout.addWidget(QLabel("⏱ 频率(分):")); self.edit_freq = QLineEdit(str(self.interval_min)); h_layout.addWidget(self.edit_freq)
+        layout.addLayout(h_layout)
 
-        h_time_layout = QHBoxLayout()
-        h_time_layout.addWidget(QLabel("⏰ 活跃时段:")); self.edit_start = QLineEdit(str(self.start_hour)); h_time_layout.addWidget(self.edit_start)
-        h_time_layout.addWidget(QLabel("至")); self.edit_end = QLineEdit(str(self.end_hour)); h_time_layout.addWidget(self.edit_end)
-        layout.addLayout(h_time_layout)
+        self.btn_apply = QPushButton("🚀 启动同步 (HTML 兼容模式)")
+        self.btn_apply.setStyleSheet("background: #28a745; color: white; font-weight: bold; padding: 12px;")
+        self.btn_apply.clicked.connect(self.apply_settings); layout.addWidget(self.btn_apply)
 
-        h_freq_layout = QHBoxLayout()
-        h_freq_layout.addWidget(QLabel("⏱ 频率(分):")); self.edit_freq = QLineEdit(str(self.interval_min)); h_freq_layout.addWidget(self.edit_freq)
-        layout.addLayout(h_freq_layout)
-
-        layout.addWidget(QLabel("📝 底部版权:"))
-        self.edit_copy = QLineEdit(self.copyright_text); layout.addWidget(self.edit_copy)
-
-        self.btn_apply = QPushButton("🚀 保存配置并启动")
-        self.btn_apply.setStyleSheet("background: #0078d4; color: white; font-weight: bold; padding: 12px;")
-        self.btn_apply.clicked.connect(self.apply_settings)
-        layout.addWidget(self.btn_apply)
-
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
+        self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("background: #1e1e1e; color: #00ff00; font-family: 'Consolas';")
-        layout.addWidget(self.log_area)
-        self.setLayout(layout)
+        layout.addWidget(self.log_area); self.setLayout(layout)
 
     def init_tray(self):
-        self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(21)) 
-        menu = QMenu()
-        menu.addAction("主界面", self.showNormal)
-        menu.addAction("退出", QApplication.instance().quit)
-        self.tray.setContextMenu(menu)
-        self.tray.show()
+        self.tray = QSystemTrayIcon(self); self.tray.setIcon(self.style().standardIcon(21))
+        menu = QMenu(); menu.addAction("显示", self.showNormal); menu.addAction("退出", QApplication.instance().quit)
+        self.tray.setContextMenu(menu); self.tray.show()
 
     def add_log(self, text):
-        safe_text = str(text).replace('\x00', '')
-        self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {safe_text}")
+        self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {str(text).replace('\x00','')}")
 
     def apply_settings(self):
         self.share_dir, self.target_kw = self.edit_path.text().strip(), self.edit_kw.text().strip()
-        try:
-            self.interval_min, self.start_hour, self.end_hour = int(self.edit_freq.text()), int(self.edit_start.text()), int(self.edit_end.text())
-            self.add_log("✅ 配置已重载")
-            self.run_cycle()
-        except: self.add_log("❌ 输入有误")
+        self.add_log("✅ 配置重载")
+        self.run_cycle()
 
     def run_cycle(self):
-        now_hour = int(time.strftime("%H"))
-        if not (self.start_hour <= now_hour < self.end_hour):
-            self.add_log(f"💤 静默中 ({now_hour}点)")
-            self.sync_timer.start(30 * 60000); return
         self.run_shell_mht_logic()
-        self.sync_timer.start(self.interval_min * 60000)
+        self.sync_timer.start(int(self.edit_freq.text()) * 60000)
 
     def run_shell_mht_logic(self):
-        """Shell 逻辑：文件中转方案"""
-        if os.path.exists(self.tmp_log): 
-            try: os.remove(self.tmp_log)
-            except: pass
-
+        """核心：将邮件保存为 HTML 格式 (olHTML=4)，解决网络路径 iframe 拒绝连接问题"""
         ps_dir = self.share_dir.replace('\\', '\\\\').replace('"', '""')
         ps_kw = self.target_kw.replace('"', '""')
         ps_tmp = self.tmp_log.replace('\\', '\\\\')
@@ -103,15 +70,16 @@ class OutlookMHTMaster(QWidget):
             if (!(Test-Path "{ps_dir}")) {{ New-Item -ItemType Directory -Path "{ps_dir}" -Force | Out-Null }}
             $ol = New-Object -ComObject Outlook.Application
             $ns = $ol.GetNamespace("MAPI")
-            $limit = (Get-Date).AddDays(-3)
             $it = $ns.GetDefaultFolder(6).Items | Where-Object {{ 
-                $_.ReceivedTime -gt $limit -and ($_.Subject -like "*{ps_kw}*" -or $_.SenderName -like "*{ps_kw}*") 
+                $_.ReceivedTime -gt (Get-Date).AddDays(-3) -and ($_.Subject -like "*{ps_kw}*" -or $_.SenderName -like "*{ps_kw}*") 
             }} | Sort-Object ReceivedTime -Descending | Select-Object -First 1
+            
             if ($it) {{
                 $name = $it.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_'
-                $path = Join-Path "{ps_dir}" "$($name.Trim()).mht"
+                $path = Join-Path "{ps_dir}" "$($name.Trim()).html"
                 if (!(Test-Path $path)) {{
-                    $it.SaveAs($path, 10)
+                    # 关键修改：保存为 HTML 格式 (类型编号 4)
+                    $it.SaveAs($path, 4)
                     "SUCCESS|$name" | Out-File "{ps_tmp}" -Encoding utf8
                 }} else {{ "EXISTS" | Out-File "{ps_tmp}" -Encoding utf8 }}
             }} else {{ "NOTFOUND" | Out-File "{ps_tmp}" -Encoding utf8 }}
@@ -131,43 +99,44 @@ class OutlookMHTMaster(QWidget):
         except Exception as e: self.add_log(f"❌ 异常: {str(e)}")
 
     def generate_html_index(self):
-        """生成支持本地安全预览的看板"""
+        """生成 index.html，通过 iframe 载入同路径下的 .html 文件"""
         if not os.path.exists(self.share_dir): return
-        files = [f for f in os.listdir(self.share_dir) if f.endswith('.mht')]
+        # 扫描 .html 文件（原邮件转出的内容）
+        files = [f for f in os.listdir(self.share_dir) if f.endswith('.html') and f != 'index.html']
         files.sort(key=lambda x: os.path.getmtime(os.path.join(self.share_dir, x)), reverse=True)
         
         html = f"""
         <!DOCTYPE html><html><head><meta charset="utf-8">
         <style>
             body {{ margin: 0; display: flex; height: 100vh; font-family: 'Segoe UI'; overflow: hidden; }}
-            .sidebar {{ width: 320px; background: #f5f5f5; border-right: 1px solid #ddd; display: flex; flex-direction: column; }}
-            .header {{ background: #0078d4; color: white; padding: 15px; font-weight: bold; }}
+            .sidebar {{ width: 300px; background: #f8f9fa; border-right: 1px solid #ddd; display: flex; flex-direction: column; }}
+            .header {{ background: #28a745; color: white; padding: 15px; font-weight: bold; font-size: 14px; }}
             .list {{ flex: 1; overflow-y: auto; }}
-            .item {{ display: block; padding: 12px; border-bottom: 1px solid #eee; cursor: pointer; }}
-            .item:hover {{ background: #eef; }}
-            .item.active {{ background: #d0e7ff; border-left: 5px solid #0078d4; }}
-            .time {{ font-size: 11px; color: #888; display: block; }}
+            .item {{ display: block; padding: 12px; border-bottom: 1px solid #eee; cursor: pointer; text-decoration: none; color: #333; }}
+            .item:hover {{ background: #e9ecef; }}
+            .item.active {{ background: #d4edda; border-left: 5px solid #28a745; }}
+            .time {{ font-size: 11px; color: #999; display: block; }}
             .preview {{ flex: 1; background: #fff; position: relative; }}
             iframe {{ width: 100%; height: 100%; border: none; }}
-            .footer {{ font-size: 11px; padding: 10px; text-align: center; color: #999; border-top: 1px solid #ddd; }}
+            .footer {{ font-size: 10px; padding: 8px; text-align: center; color: #999; border-top: 1px solid #ddd; }}
         </style>
         <script>
             function view(el, url) {{
                 document.querySelectorAll('.item').forEach(i => i.classList.remove('active'));
                 el.classList.add('active');
+                // 直接使用相对路径加载
                 document.getElementById('f').src = url;
             }}
         </script></head>
         <body>
             <div class="sidebar">
-                <div class="header">📫 RD 邮件看板<br><small style="font-weight:normal">关键词: {self.target_kw}</small></div>
+                <div class="header">📫 RD 邮件分发看板<br><small>网络路径模式</small></div>
                 <div class="list">
         """
-        for i, f in enumerate(files):
+        for f in files:
             mt = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(os.path.join(self.share_dir, f))))
-            # 核心锁：对路径进行安全编码
             safe_f = urllib.parse.quote(f)
-            html += f'<div class="item" onclick="view(this, \'{safe_f}\')"><b>{f[:35]}...</b><span class="time">🕒 {mt}</span></div>'
+            html += f'<div class="item" onclick="view(this, \'{safe_f}\')"><b>{f[:30]}...</b><span class="time">🕒 {mt}</span></div>'
         
         html += f"""
                 </div><div class="footer">{self.copyright_text}</div>
@@ -175,7 +144,9 @@ class OutlookMHTMaster(QWidget):
             <div class="preview"><iframe id="f"></iframe></div>
         </body></html>
         """
-        with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
+        try:
+            with open(os.path.join(self.share_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
+        except Exception as e: self.add_log(f"写入HTML失败: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
