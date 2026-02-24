@@ -2,7 +2,7 @@ name: Build Outlook Master EXE
 
 on:
   push:
-    branches: [ "main" ]  # 当代码推送到 main 分支时触发
+    branches: [ "main" ]  # 确保你的分支名是 main
 
 jobs:
   build:
@@ -10,10 +10,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # 已更新至 v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5  # 已更新至 v5
       with:
         python-version: '3.9'
 
@@ -24,11 +24,12 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        # --noconsole 隐藏黑窗口, --onefile 打包成单文件
-        pyinstaller --noconsole --onefile --name "OutlookMaster_V45" main.py
+        # --noconsole 运行时不弹出黑窗口, --onefile 打包成单个可执行文件
+        pyinstaller --noconsole --onefile --name "OutlookMaster_V45" OutlookMasterV45.py
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # 🔥 关键修复：必须使用 v4
       with:
         name: OutlookMaster_Executable
         path: dist/OutlookMaster_V45.exe
+        retention-days: 5  # 可选：设置文件保留天数
