@@ -30,37 +30,31 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V50.0")
+        self.setWindowTitle("EDFA 看板后台 V50.1")
         self.resize(520, 900)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
         def quick_edit(label, val, attr):
             l = QHBoxLayout(); lb = QLabel(label); lb.setFixedWidth(110); l.addWidget(lb)
             edit = QLineEdit(str(val)); setattr(self, attr, edit); l.addWidget(edit); layout.addLayout(l)
-        
         quick_edit("📂 共享路径", self.share_dir, "ui_path")
         quick_edit("📧 邮件关键词", self.target_kw, "ui_kw")
         quick_edit("🔍 提取正则", self.tag_regex, "ui_regex")
         quick_edit("🚩 网页大标题", self.web_title, "ui_title")
         quick_edit("📝 网页小字备注", self.web_sub_title, "ui_subtitle")
-        
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("⏱ 同步频率(分)")); self.ui_freq = QLineEdit(str(self.interval_min)); h1.addWidget(self.ui_freq)
         h1.addWidget(QLabel("🌐 网页刷新(秒)")); self.ui_web_freq = QLineEdit(str(self.web_refresh_sec)); h1.addWidget(self.ui_web_freq)
         layout.addLayout(h1)
-        
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("🔢 抓取数")); self.ui_count = QLineEdit(str(self.sync_count)); h2.addWidget(self.ui_count)
         h2.addWidget(QLabel("⏰ 时段")); self.ui_start = QLineEdit(str(self.start_hour)); h2.addWidget(self.ui_start)
         h2.addWidget(QLabel("-")); self.ui_end = QLineEdit(str(self.end_hour)); h2.addWidget(self.ui_end)
         layout.addLayout(h2)
-        
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
-        
         self.btn_apply = QPushButton("🚀 立即同步并解析"); self.btn_apply.setFixedHeight(50)
         self.btn_apply.clicked.connect(self.apply_settings); layout.addWidget(self.btn_apply)
-        
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True); layout.addWidget(self.log_area)
         self.setLayout(layout); self.restyle()
 
@@ -126,11 +120,10 @@ class OutlookMHTMaster(QWidget):
                 os.remove(p_m)
             except: pass
         
-        # --- 漂亮的 1234567 工作日历解析 ---
+        # --- 智能日历：1-7 排序 & 一屏全显 ---
         cal_html = ""
         now_dt = datetime.datetime.now()
         today_str = now_dt.strftime('%Y-%m-%d')
-        # 2026 补班表
         WORK_DATES_2026 = ["2026-01-04", "2026-02-14", "2026-02-28", "2026-05-09", "2026-09-20", "2026-10-10", "2026-10-11"]
 
         for f_name in os.listdir(d):
@@ -142,13 +135,16 @@ class OutlookMHTMaster(QWidget):
                     data = list(ws.iter_rows(values_only=True))
                     if not data: continue
                     
+                    # 💡 自动缩放算法：根据行数和列数动态计算 zoom
+                    max_rows, max_cols = len(data), len(data[0])
+                    cal_zoom = round(min(1.0, 15 / max_rows, 18 / max_cols), 2)
+                    if cal_zoom < 0.5: cal_zoom = 0.5 # 保底缩放
+
                     for i, row in enumerate(data):
                         if not any(row): continue
-                        # 核心重排逻辑：如果原表第一列是周日，则重排为 一二三四五六日
-                        # 假设 Excel 原本顺序是 [日,一,二,三,四,五,六] -> 索引 [0,1,2,3,4,5,6]
-                        # 转换后索引应为 [1,2,3,4,5,6,0]
+                        # 💡 强制 1234567 排序 (假设原表 0 位是周日)
                         try: ordered_row = [row[1], row[2], row[3], row[4], row[5], row[6], row[0]]
-                        except: ordered_row = row # 容错处理
+                        except: ordered_row = row 
                         
                         row_content = ""
                         for cell_val in ordered_row:
@@ -160,7 +156,7 @@ class OutlookMHTMaster(QWidget):
                                     dt_str = dt.strftime('%Y-%m-%d')
                                     if dt_str == today_str:
                                         cls = "today-cell"
-                                        style = "background:#fff9e6; outline:2px solid #ffba00; font-weight:bold;"
+                                        style = "background:#fff9e6; outline:2px solid #ffba00; font-weight:bold; box-shadow: 0 0 10px #ffba00;"
                                     elif dt_str in WORK_DATES_2026:
                                         style = "background:#005a9e; color:white; font-weight:bold;"
                                     elif dt.weekday() >= 5:
@@ -176,8 +172,8 @@ class OutlookMHTMaster(QWidget):
                             tag = "th" if i == 0 else "td"
                             row_content += f"<{tag} class='{cls}' style='{style}'>{val}</{tag}>"
                         rows_html += f"<tr>{row_content}</tr>"
-                    cal_html = f"<div id='zoomWrap'><table class='cal-table'>{rows_html}</table></div>"
-                    self.add_log(f"📅 工作日历(1234567排序)已解析: {f_name}")
+                    cal_html = f"<div id='calZoomWrapper' style='zoom:{cal_zoom}; transform-origin: top center;'><table class='cal-table'>{rows_html}</table></div>"
+                    self.add_log(f"📅 工作日历一页显示优化(Zoom:{cal_zoom})")
                     break
                 except Exception as e: self.add_log(f"日历解析失败: {e}")
         self.build_index(cal_html)
@@ -215,7 +211,7 @@ class OutlookMHTMaster(QWidget):
             .mail-item.search-hit {{ background-color: #fff9c4 !important; border-left: 5px solid #fbc02d !important; font-weight: bold; }}
             .mail-item.active {{ border-left: 5px solid {c}; background: #eff6ef; }}
             .content {{ flex: 1; display: flex; flex-direction: column; min-width: 0; background: white; }}
-            .mail-display {{ flex: 1; overflow: auto; background: #f8f9fa; }}
+            .mail-display {{ flex: 1; overflow: auto; background: #f8f9fa; position: relative; }}
             .mail-inner-zoom {{ padding: 25px; zoom: 0.9; min-width: fit-content; background: white; margin: 15px auto; width: 95%; box-shadow: 0 2px 15px rgba(0,0,0,0.05); border-radius: 4px; }}
             .mail-inner-zoom table {{ border-collapse: collapse; min-width: 600px; }}
             .mail-inner-zoom td, .mail-inner-zoom th {{ border: 1px solid #ddd; padding: 5px 10px; font-size: 13px; white-space: nowrap; }}
@@ -224,10 +220,9 @@ class OutlookMHTMaster(QWidget):
             mark {{ background: #ffeb3b; color: #000; font-weight: bold; padding: 0 2px; border-radius: 2px; }}
             .modal {{ display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); }}
             .modal-content {{ background: white; margin: 1vh auto; width: 98%; height: 96%; border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }}
-            .modal-body {{ flex: 1; overflow: auto; padding: 15px; display: flex; justify-content: center; }}
-            .cal-table {{ border-collapse: separate; border-spacing: 4px; width: 100%; }}
-            .cal-table th, .cal-table td {{ padding: 12px; border-radius: 6px; text-align: center; border: 1px solid #f3f2f1; white-space: nowrap; }}
-            .today-cell {{ box-shadow: 0 0 12px rgba(255, 186, 0, 0.8); transform: scale(1.02); }}
+            .modal-body {{ flex: 1; overflow: hidden; padding: 10px; display: flex; justify-content: center; align-items: center; }}
+            .cal-table {{ border-collapse: separate; border-spacing: 2px; width: 100%; }}
+            .cal-table th, .cal-table td {{ padding: 8px; border-radius: 4px; text-align: center; border: 1px solid #f3f2f1; white-space: nowrap; }}
         </style></head>
         <body>
             <div class="sidebar">
@@ -249,7 +244,7 @@ class OutlookMHTMaster(QWidget):
             <div id="mdl" class="modal">
                 <div class="modal-content">
                     <div style="padding:15px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center;">
-                        <h3 style="margin:0; color:{c};">📅 工作日历 (1234567 排序)</h3>
+                        <h3 style="margin:0; color:{c};">📅 工作日历 (一页全显示版)</h3>
                         <span style="cursor:pointer; font-size:35px;" onclick="tgl(false)">&times;</span>
                     </div>
                     <div class="modal-body">{cal_html}</div>
@@ -322,15 +317,12 @@ class OutlookMHTMaster(QWidget):
                 }}
 
                 function cls() {{ document.getElementById('s').value=''; flt(); document.getElementById('s').focus(); }}
-                function tgl(s) {{ 
-                    document.getElementById('mdl').style.display = s ? 'block' : 'none'; 
-                    if(s) {{ setTimeout(() => {{ let t = document.querySelector('.today-cell'); if(t) t.scrollIntoView({{ behavior: 'smooth', block: 'center' }}); }}, 150); }}
-                }}
+                function tgl(s) {{ document.getElementById('mdl').style.display = s ? 'block' : 'none'; }}
                 window.onclick = function(e) {{ if(e.target == document.getElementById('mdl')) tgl(false); }}
             </script>
         </body></html>"""
         with open(os.path.join(d, "index.html"), 'w', encoding='utf-8') as f: f.write(full_html)
-        self.add_log(f"✅ 网页静默同步完成 ({update_time})")
+        self.add_log(f"✅ 网页静默同步完成 (一页显示已优化)")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
