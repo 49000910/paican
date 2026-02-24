@@ -30,7 +30,7 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V59.0")
+        self.setWindowTitle("EDFA 看板后台 V65.0")
         self.resize(520, 900)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
@@ -108,7 +108,7 @@ class OutlookMHTMaster(QWidget):
         d = self.ui_path.text().strip()
         if not os.path.exists(d): return
         
-        # 1. 邮件解析
+        # 1. 邮件文件解析 (MHT to HTML)
         for f in [x for x in os.listdir(d) if x.endswith('.mht')]:
             p_m, p_h = os.path.join(d, f), os.path.join(d, f.replace('.mht', '.html'))
             try:
@@ -125,111 +125,157 @@ class OutlookMHTMaster(QWidget):
         all_htmls = [x for x in os.listdir(d) if x.endswith('.html') and x != "index.html"]
         all_htmls.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
 
-        # 2. 日历解析 (保留原逻辑)
+        # 2. Excel 解析 (还原背景与字体颜色)
         cal_html = ""
         for f_name in os.listdir(d):
             if "2026日历" in f_name and f_name.lower().endswith('.xlsx'):
                 try:
                     wb = openpyxl.load_workbook(os.path.join(d, f_name), data_only=True)
                     ws = wb.active
-                    rows_html = "<table border='1' style='border-collapse:collapse;width:100%;font-size:12px;'>"
+                    rows_html = "<table border='1' style='border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap;'>"
                     for row in ws.iter_rows():
                         rows_html += "<tr>"
                         for cell in row:
                             val = "" if cell.value is None else str(cell.value)
-                            bg = f"#{cell.fill.start_color.rgb[2:]}" if cell.fill and hasattr(cell.fill.start_color, 'rgb') and len(str(cell.fill.start_color.rgb))>2 else "white"
-                            rows_html += f"<td style='background:{bg};padding:5px;'>{val}</td>"
+                            bg_color = "white"
+                            if cell.fill and hasattr(cell.fill, 'start_color') and cell.fill.start_color.index != "00000000":
+                                try: bg_color = f"#{str(cell.fill.start_color.rgb)[2:]}"
+                                except: bg_color = "white"
+                            font_color = "black"
+                            if cell.font and cell.font.color and hasattr(cell.font.color, 'rgb'):
+                                try: font_color = f"#{str(cell.font.color.rgb)[-6:]}"
+                                except: font_color = "black"
+                            rows_html += f"<td style='background:{bg_color};color:{font_color};padding:4px;text-align:center;'>{val}</td>"
                         rows_html += "</tr>"
                     cal_html = rows_html + "</table>"
                 except: pass
 
-        # 3. 构造邮件项
+        # 3. 构造侧边栏卡片 (应用主题色标题)
         mail_items_html = ""
         for h in all_htmls:
             tags = re.findall(self.ui_regex.text(), h)
-            tag_spans = "".join([f"<span style='font-size:10px;background:{self.ui_color.text()};color:white;padding:2px 5px;border-radius:3px;margin-right:5px;'>{t}</span>" for t in tags])
+            tag_spans = "".join([f"<span class='tag'>{t}</span>" for t in tags])
             mail_items_html += f"""
-            <div style='background:white;padding:12px;margin-bottom:10px;border-left:5px solid {self.ui_color.text()};cursor:pointer;box-shadow:0 2px 4px rgba(0,0,0,0.05);' onclick="viewMail('{h}')">
-                <div style='font-weight:bold;margin-bottom:5px;'>{h.replace('.html','')}</div>
+            <div class='mail-card searchable-item' data-title='{h.replace('.html','')}' onclick="viewMail('{h}')">
+                <div class='mail-title'>{h.replace('.html','')}</div>
                 <div>{tag_spans}</div>
             </div>"""
 
-        # 4. 生成 index.html
+        # 4. 生成 index.html (恢复 UI 标题颜色 + 滚动记忆)
         index_path = os.path.join(d, "index.html")
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write(f"""
-            <html><head><meta charset="utf-8">
-            <title>{self.ui_title.text()}</title>
+            <html><head><meta charset="utf-8"><title>{self.ui_title.text()}</title>
             <style>
                 body {{ display: flex; margin: 0; height: 100vh; font-family: 'Microsoft YaHei'; overflow: hidden; background:#eee; }}
                 #sidebar {{ width: 380px; background: #f8f9fa; border-right: 1px solid #ddd; display: flex; flex-direction: column; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }}
                 #list_container {{ flex: 1; overflow-y: auto; padding: 15px; }}
                 #content_area {{ flex: 1; border: none; background: white; }}
-                h3 {{ font-size: 14px; color: #555; border-bottom: 1px solid #eee; padding-bottom: 5px; margin-top:15px; }}
-                .btn-cal {{ background:{self.ui_color.text()}; color:white; border:none; padding:10px; width:100%; border-radius:4px; cursor:pointer; font-weight:bold; margin-bottom:10px; }}
                 
-                /* 底部倒计时与绿点样式 */
-                #footer {{ padding: 15px; background: white; border-top: 1px solid #eee; text-align: center; }}
-                .status-container {{ display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: #666; margin-bottom: 5px; }}
-                .dot {{ width: 8px; height: 8px; background-color: #28a745; border-radius: 50%; display: inline-block; animation: blink 1.5s infinite; }}
+                /* 搜索框样式 */
+                .search-box {{ padding: 10px 15px; background: white; border-bottom: 1px solid #eee; }}
+                .search-input {{ width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
+                
+                /* 邮件卡片标题颜色应用主题色 */
+                .mail-card {{ background: white; padding: 12px; margin-bottom: 10px; border-left: 5px solid {self.ui_color.text()}; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+                .mail-title {{ font-weight: bold; margin-bottom: 5px; color: {self.ui_color.text()}; }}
+                .tag {{ font-size: 10px; background: {self.ui_color.text()}; color: white; padding: 2px 5px; border-radius: 3px; margin-right: 5px; }}
+                
+                /* 底部样式 */
+                #footer {{ padding: 15px; background: white; border-top: 1px solid #eee; }}
+                .btn-cal {{ background:{self.ui_color.text()}; color:white; border:none; padding:10px; width:100%; border-radius:4px; cursor:pointer; font-weight:bold; margin-bottom:10px; }}
+                .status-line {{ display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: #666; margin-bottom: 6px; }}
+                .dot {{ width: 8px; height: 8px; background-color: #28a745; border-radius: 50%; animation: blink 1.5s infinite; }}
                 @keyframes blink {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
                 
-                /* 弹窗 */
-                #cal_modal {{ display:none; position:fixed; top:5%; left:5%; width:90%; height:85%; background:white; z-index:1000; box-shadow:0 0 20px rgba(0,0,0,0.5); border-radius:8px; overflow:auto; padding:20px; }}
+                /* 日历弹窗 */
+                #cal_modal {{ display:none; position:fixed; top:2%; left:2%; width:96%; height:94%; background:white; z-index:1000; box-shadow:0 0 30px rgba(0,0,0,0.5); border-radius:8px; overflow:auto; padding:15px; }}
                 #modal_mask {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:999; }}
-                .close-btn {{ float:right; cursor:pointer; color:red; font-weight:bold; font-size:18px; }}
+                .cal-table-wrapper {{ zoom: 0.6; }}
             </style>
             </head><body>
             <div id="sidebar">
-                <div style="padding:20px; background:white; border-bottom:1px solid #eee;">
-                    <h2 style="margin:0; font-size:20px; color:{self.ui_color.text()};">{self.ui_title.text()}</h2>
-                    <div style="font-size:11px; color:#999; margin-top:4px;">{self.web_sub_title}</div>
+                <div style="padding:15px; background:white;">
+                    <h2 style="margin:0; font-size:18px; color:{self.ui_color.text()}; text-align:center;">{self.ui_title.text()}</h2>
+                    <div style="font-size:11px; color:#999; text-align:center; margin-top:5px;">{self.web_sub_title}</div>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="searchInput" class="search-input" placeholder="🔍 输入索引关键词定位..." onkeyup="filterItems()">
                 </div>
                 <div id="list_container">
-                    <button class="btn-cal" onclick="showCal()">📅 查看生产排产日历 (Excel)</button>
-                    <h3>📧 最新邮件列表</h3>
                     {mail_items_html}
                 </div>
-                
-                <!-- 底部计时布局还原 -->
                 <div id="footer">
-                    <div class="status-container">
+                    <button class="btn-cal" onclick="showCal()">📅 查看生产排产日历预览</button>
+                    <div class="status-line">
                         <span class="dot"></span>
-                        <span id="timer_ui">正在等待同步...</span>
+                        <span id="timer_ui">系统运行中...</span>
                     </div>
-                    <div style="font-size:10px; color:#bbb;">{self.copyright_text} | 最后同步: {time.strftime('%H:%M:%S')}</div>
+                    <div style="font-size:10px; color:#bbb; text-align:center;">{self.copyright_text} | {time.strftime('%H:%M:%S')}</div>
                 </div>
             </div>
-            
             <iframe id="content_area" name="content_area" src="about:blank"></iframe>
-
             <div id="modal_mask" onclick="hideCal()"></div>
             <div id="cal_modal">
-                <span class="close-btn" onclick="hideCal()">[关闭窗口]</span>
-                <h2 style="color:{self.ui_color.text()}">生产排产日历预览</h2>
-                <hr>{cal_html}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <b style="color:{self.ui_color.text()}">生产排产日历 (全页缩放预览)</b>
+                    <button onclick="hideCal()" style="cursor:pointer; padding:5px 15px; background:#ddd; border:none; border-radius:4px;">关闭 [ESC]</button>
+                </div>
+                <div class="cal-table-wrapper">{cal_html}</div>
             </div>
-
             <script>
+                function filterItems() {{
+                    let input = document.getElementById('searchInput').value.toLowerCase();
+                    let items = document.getElementsByClassName('searchable-item');
+                    for (let i = 0; i < items.length; i++) {{
+                        let title = items[i].querySelector('.mail-title').innerText.toLowerCase();
+                        items[i].style.display = title.includes(input) ? "" : "none";
+                    }}
+                }}
                 function showCal() {{ document.getElementById('cal_modal').style.display='block'; document.getElementById('modal_mask').style.display='block'; }}
                 function hideCal() {{ document.getElementById('cal_modal').style.display='none'; document.getElementById('modal_mask').style.display='none'; }}
-                function viewMail(url) {{ document.getElementById('content_area').src = url; localStorage.setItem('current_mail', url); }}
+                
+                function viewMail(url) {{ 
+                    document.getElementById('content_area').src = url; 
+                    localStorage.setItem('current_mail', url); 
+                }}
+
+                // 保存并还原滚动位置
+                function saveScrollPos() {{
+                    const iframe = document.getElementById('content_area');
+                    if (iframe.contentWindow) {{ localStorage.setItem('scroll_y', iframe.contentWindow.scrollY); }}
+                }}
 
                 let countdown = {self.ui_web_freq.text()};
                 setInterval(() => {{
                     countdown--;
-                    document.getElementById('timer_ui').innerText = '数据活跃中: 预计 ' + countdown + ' 秒后刷新';
-                    if(countdown <= 0) {{ location.reload(); }}
+                    document.getElementById('timer_ui').innerText = '系统活跃: ' + countdown + 's 后同步刷新';
+                    if(countdown <= 0) {{ 
+                        saveScrollPos();
+                        localStorage.setItem('search_val', document.getElementById('searchInput').value);
+                        location.reload(); 
+                    }}
                 }}, 1000);
 
                 window.onload = () => {{
+                    let lastSearch = localStorage.getItem('search_val');
+                    if(lastSearch) {{ document.getElementById('searchInput').value = lastSearch; filterItems(); }}
+                    
                     let lastUrl = localStorage.getItem('current_mail');
-                    if(lastUrl && lastUrl !== 'about:blank') {{ document.getElementById('content_area').src = lastUrl; }}
+                    if(lastUrl && lastUrl !== 'about:blank') {{ 
+                        const iframe = document.getElementById('content_area');
+                        iframe.src = lastUrl;
+                        iframe.onload = function() {{
+                            let lastY = localStorage.getItem('scroll_y');
+                            if (lastY) {{ iframe.contentWindow.scrollTo(0, parseInt(lastY)); }}
+                        }};
+                    }}
                 }};
+                document.addEventListener('keydown', (e) => {{ if(e.key === "Escape") hideCal(); }});
             </script>
             </body></html>
             """)
-        self.add_log("✅ 看板 V59.0 布局还原完成（含底部倒计时与绿点闪烁）")
+        self.add_log("✅ 看板 V65.0 修正完成：列表标题已应用主题色，修复滚动与搜索记忆")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
