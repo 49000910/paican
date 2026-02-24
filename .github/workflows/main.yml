@@ -1,38 +1,43 @@
-name: Build Outlook Sync EXE
+name: 打包 EDFA 看板 EXE (main版)
 
-on: 
+on:
   push:
-    branches: [ "main" ] # 只有推送到 main 分支时才触发，或者根据需要修改
-  pull_request:
-    branches: [ "main" ]
+    branches: [ "main" ]  # 提交代码到 main 分支时触发
+  workflow_dispatch:      # 支持手动点击按钮触发
 
 jobs:
   build:
-    runs-on: windows-latest # 必须在 Windows 环境下打包 EXE
+    runs-on: windows-latest  # 必须在 Windows 环境下打包 EXE
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4 # 升级到 v4
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5 # 升级到 v5
+      - name: 设置 Python 3.9
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: 安装全量依赖 (包含 Pandas 和 Excel 引擎)
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pywin32 PyQt5
+          # 必须安装 pandas, openpyxl(读取xlsx), jinja2(染色渲染)
+          pip install pandas openpyxl jinja2 PyQt5 pyinstaller
 
-      - name: Build with PyInstaller
+      - name: 执行 PyInstaller 深度打包
         run: |
-          # --onefile 打包成单个 EXE
-          # --windowed 运行时不显示黑色的命令行窗口
-          # --name 设置生成的文件名
-          pyinstaller --onefile --windowed --name "OutlookSyncMaster" main.py
+          # 使用 --hidden-import 强制注入被漏掉的 pandas 模块
+          # --noconsole 隐藏黑窗口, --onefile 生成单文件
+          pyinstaller --noconsole --onefile `
+          --hidden-import=pandas `
+          --hidden-import=openpyxl `
+          --hidden-import=jinja2 `
+          --name="EDFA_Dashboard_V41" `
+          main.py
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4 # 核心修复点：升级到 v4
+      - name: 上传生成的 EXE 到 GitHub Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: OutlookSyncMaster-EXE
-          path: dist/OutlookSyncMaster.exe
+          name: EDFA_Dashboard_EXE
+          path: dist/EDFA_Dashboard_V41.exe
