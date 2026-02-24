@@ -1,43 +1,46 @@
-name: 打包 EDFA 看板 EXE (main版)
+name: 打包 EDFA 看板 EXE (V41最终版)
 
 on:
   push:
-    branches: [ "main" ]  # 提交代码到 main 分支时触发
-  workflow_dispatch:      # 支持手动点击按钮触发
+    branches: [ "main" ]  # 提交到 main 分支时自动触发
+  workflow_dispatch:      # 支持在 GitHub 页面手动点击运行
 
 jobs:
   build:
-    runs-on: windows-latest  # 必须在 Windows 环境下打包 EXE
+    runs-on: windows-latest  # 必须在 Windows 环境打包以生成 .exe
 
     steps:
-      - name: 检出代码
+      - name: 1. 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python 3.9
+      - name: 2. 初始化 Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-          cache: 'pip'
+          # 已移除 cache: 'pip'，解决 "No file matched" 报错
 
-      - name: 安装全量依赖 (包含 Pandas 和 Excel 引擎)
+      - name: 3. 强制安装核心依赖库
         run: |
           python -m pip install --upgrade pip
-          # 必须安装 pandas, openpyxl(读取xlsx), jinja2(染色渲染)
+          # 必须安装 pandas(数据), openpyxl(Excel引擎), jinja2(染色渲染), PyQt5(界面)
           pip install pandas openpyxl jinja2 PyQt5 pyinstaller
 
-      - name: 执行 PyInstaller 深度打包
+      - name: 4. 执行 PyInstaller 深度打包
         run: |
-          # 使用 --hidden-import 强制注入被漏掉的 pandas 模块
-          # --noconsole 隐藏黑窗口, --onefile 生成单文件
+          # --hidden-import 确保打包时不会漏掉关键组件
+          # --noconsole 运行时隐藏黑色命令行窗口
           pyinstaller --noconsole --onefile `
           --hidden-import=pandas `
           --hidden-import=openpyxl `
           --hidden-import=jinja2 `
+          --hidden-import=PyQt5.QtCore `
+          --hidden-import=PyQt5.QtGui `
+          --hidden-import=PyQt5.QtWidgets `
           --name="EDFA_Dashboard_V41" `
           main.py
 
-      - name: 上传生成的 EXE 到 GitHub Artifacts
+      - name: 5. 上传生成的 EXE 文件
         uses: actions/upload-artifact@v4
         with:
-          name: EDFA_Dashboard_EXE
+          name: EDFA_Dashboard_V41_Package
           path: dist/EDFA_Dashboard_V41.exe
