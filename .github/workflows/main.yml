@@ -25,7 +25,7 @@ jobs:
     - name: Build EXE with PyInstaller
       run: |
         # --noconsole 运行时不弹出黑窗口, --onefile 打包成单个可执行文件
-        pyinstaller --noconsole --onefile --name "OutlookMaster_V45" OutlookMasterV45.py
+        pyinstaller --noconsole --onefile --name "OutlookMaster_V45" main.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4  # 🔥 关键修复：必须使用 v4
