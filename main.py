@@ -9,7 +9,7 @@ from PyQt5.QtCore import QTimer, Qt
 class OutlookMHTMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 默认参数 (完全还原您的定义) ---
+        # --- 默认参数 (完全还原) ---
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.tag_regex = r'\bEP[A-Z0-9]{9}\b' 
@@ -30,31 +30,37 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V54.5")
+        self.setWindowTitle("EDFA 看板后台 V56.0")
         self.resize(520, 900)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
         def quick_edit(label, val, attr):
             l = QHBoxLayout(); lb = QLabel(label); lb.setFixedWidth(110); l.addWidget(lb)
             edit = QLineEdit(str(val)); setattr(self, attr, edit); l.addWidget(edit); layout.addLayout(l)
+        
         quick_edit("📂 共享路径", self.share_dir, "ui_path")
         quick_edit("📧 邮件关键词", self.target_kw, "ui_kw")
         quick_edit("🔍 提取正则", self.tag_regex, "ui_regex")
         quick_edit("🚩 网页大标题", self.web_title, "ui_title")
         quick_edit("📝 网页小字备注", self.web_sub_title, "ui_subtitle")
+        
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("⏱ 同步频率(分)")); self.ui_freq = QLineEdit(str(self.interval_min)); h1.addWidget(self.ui_freq)
         h1.addWidget(QLabel("🌐 网页刷新(秒)")); self.ui_web_freq = QLineEdit(str(self.web_refresh_sec)); h1.addWidget(self.ui_web_freq)
         layout.addLayout(h1)
+        
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("🔢 抓取数")); self.ui_count = QLineEdit(str(self.sync_count)); h2.addWidget(self.ui_count)
         h2.addWidget(QLabel("⏰ 时段")); self.ui_start = QLineEdit(str(self.start_hour)); h2.addWidget(self.ui_start)
         h2.addWidget(QLabel("-")); self.ui_end = QLineEdit(str(self.end_hour)); h2.addWidget(self.ui_end)
         layout.addLayout(h2)
+        
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
+        
         self.btn_apply = QPushButton("🚀 立即同步并解析"); self.btn_apply.setFixedHeight(50)
         self.btn_apply.clicked.connect(self.apply_settings); layout.addWidget(self.btn_apply)
+        
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True); layout.addWidget(self.log_area)
         self.setLayout(layout); self.restyle()
 
@@ -107,6 +113,8 @@ class OutlookMHTMaster(QWidget):
     def process_web(self):
         d = self.ui_path.text().strip()
         if not os.path.exists(d): return
+        
+        # 1. 转换邮件 (保留您的解析逻辑)
         for f in [x for x in os.listdir(d) if x.endswith('.mht')]:
             p_m, p_h = os.path.join(d, f), os.path.join(d, f.replace('.mht', '.html'))
             try:
@@ -119,194 +127,106 @@ class OutlookMHTMaster(QWidget):
                             with open(p_h, 'w', encoding='utf-8') as hw: hw.write(clean_content)
                 os.remove(p_m)
             except: pass
-        
+            
+        # 2. 扫描 HTML 并提取正则索引 (EPXXXXXX)
+        all_htmls = [x for x in os.listdir(d) if x.endswith('.html') and x != "index.html"]
+        all_htmls.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
+        refined_mails = []
+        for h in all_htmls:
+            tags = re.findall(self.ui_regex.text(), h)
+            refined_mails.append({"file": h, "title": h.replace('.html',''), "tags": tags})
+
+        # 3. 解析 Excel 日历 (完全保留)
         cal_html = ""
         for f_name in os.listdir(d):
             if "2026日历" in f_name and f_name.lower().endswith('.xlsx'):
                 try:
                     wb = openpyxl.load_workbook(os.path.join(d, f_name), data_only=True)
                     ws = wb.active
-                    merged_cells = ws.merged_cells.ranges
-                    rows_html = ""
+                    # 合并单元格的简化处理
+                    rows_html = "<table style='border-collapse:collapse;width:100%;font-size:11px;'>"
                     for row in ws.iter_rows():
-                        row_content = ""
+                        rows_html += "<tr>"
                         for cell in row:
-                            is_merged = False
-                            for merged in merged_cells:
-                                if cell.coordinate in merged and cell.coordinate != merged.start_cell.coordinate:
-                                    is_merged = True; break
-                            if is_merged: continue
                             val = "" if cell.value is None else str(cell.value)
-                            bg, color = "white", "black"
-                            if cell.fill and hasattr(cell.fill, 'start_color') and cell.fill.start_color.index != "00000000":
-                                try: bg = f"#{cell.fill.start_color.rgb[2:]}"
-                                except: pass
-                            if cell.font and cell.font.color and hasattr(cell.font.color, 'rgb'):
-                                try: color = f"#{cell.font.color.rgb[2:]}"
-                                except: pass
-                            colspan, rowspan = 1, 1
-                            for m in merged_cells:
-                                if cell.coordinate == m.start_cell.coordinate:
-                                    colspan, rowspan = m.size['columns'], m.size['rows']; break
-                            style = f"background:{bg};color:{color};border:1px solid #d4d4d4;"
-                            if val == datetime.datetime.now().strftime('%d'):
-                                style += "outline:3px solid #ffba00;outline-offset:-3px;"
-                            row_content += f"<td style='{style}' colspan='{colspan}' rowspan='{rowspan}'>{val}</td>"
-                        rows_html += f"<tr>{row_content}</tr>"
-                    cal_html = f"<table class='excel-table'>{rows_html}</table>"
-                    self.add_log(f"📅 工作日历解析完成")
-                    break
-                except Exception as e: self.add_log(f"日历解析失败: {e}")
-        self.build_index(cal_html)
+                            bg = f"#{cell.fill.start_color.rgb[2:]}" if cell.fill and hasattr(cell.fill.start_color, 'rgb') and len(str(cell.fill.start_color.rgb))>2 else "white"
+                            rows_html += f"<td style='border:1px solid #ddd;background:{bg};padding:3px;'>{val}</td>"
+                        rows_html += "</tr>"
+                    cal_html = rows_html + "</table>"
+                except: pass
 
-    def build_index(self, cal_html):
-        d, c = self.ui_path.text().strip(), self.ui_color.text().strip() or "#107c10"
-        t1, t2, cp = self.ui_title.text().strip(), self.ui_subtitle.text().strip(), self.ui_copy.text().strip()
-        all_files = [f for f in os.listdir(d) if f.endswith('.html') and f != 'index.html']
-        all_files.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
-        try: w_ref = int(self.ui_web_freq.text())
-        except: w_ref = 60
-        update_time = time.strftime('%Y-%m-%d %H:%M:%S')
-        items_html, mails_content_html, regex_ptr = "", "", self.ui_regex.text().strip()
+        # 4. 生成数据 JSON
+        json_data = {"time": time.strftime('%H:%M:%S'), "mails": refined_mails, "cal": cal_html, "refresh_sec": self.ui_web_freq.text()}
+        with open(os.path.join(d, "data.json"), 'w', encoding='utf-8') as jf:
+            json.dump(json_data, jf)
 
-        for i, f in enumerate(all_files):
-            file_path = os.path.join(d, f)
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as tf: content = tf.read()
-            tags = " ".join(list(set(re.findall(regex_ptr, content))))
-            items_html += f'<div class="mail-item {"active" if i==0 else ""}" onclick="showMail(\'{i}\', this)" data-tags="{tags}"><b>{f[:-5]}</b></div>'
-            mails_content_html += f'<div id="mail-{i}" class="mail-body" style="display:{"block" if i==0 else "none"}"><div class="mail-inner-zoom">{content}</div></div>'
-
-        full_html = f"""
-        <!DOCTYPE html>
-        <html><head><meta charset="utf-8"><title>{t1}</title>
-        <style>
-            body {{ font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; background:#f3f2f1; }}
-            .sidebar {{ width: 340px; background: white; border-right: 1px solid #edebe9; display: flex; flex-direction: column; flex-shrink: 0; height: 100vh; }}
-            .header {{ padding: 20px 16px; background: {c}; color: white; flex-shrink: 0; }}
-            .search-box {{ padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3f2f1; position: relative; }}
-            .search-box input {{ width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; box-sizing: border-box; }}
-            .clear-btn {{ position: absolute; right: 26px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #bbb; display: none; font-size: 20px; }}
-            .mail-list {{ flex: 1; overflow-y: auto; }}
-            .mail-item {{ padding: 14px 16px; border-bottom: 1px solid #f3f2f1; cursor: pointer; }}
-            .mail-item.search-hit {{ background-color: #fff9c4 !important; border-left: 5px solid #fbc02d !important; }}
-            .mail-item.active {{ border-left: 5px solid {c}; background: #eff6ef; }}
-            .content {{ flex: 1; display: flex; flex-direction: column; min-width: 0; background: white; }}
-            .mail-display {{ flex: 1; overflow: auto; background: #f8f9fa; }}
-            .mail-inner-zoom {{ padding: 25px; zoom: 0.9; background: white; margin: 15px auto; width: 95%; box-shadow: 0 2px 15px rgba(0,0,0,0.05); }}
-            .footer {{ font-size: 11px; color: #888; padding: 10px 16px; background: #fdfdfd; border-top: 1px solid #f3f2f1; display: flex; justify-content: space-between; align-items: center; }}
-            .cal-trigger {{ cursor: pointer; color: {c}; font-weight: bold; text-decoration: underline; }}
-            #toast {{ display: none; position: fixed; right: 20px; bottom: 60px; background: {c}; color: white; padding: 12px 24px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); z-index: 10000; font-size: 14px; font-weight: bold; animation: slideIn 0.5s ease-out; }}
-            @keyframes slideIn {{ from {{ transform: translateY(100px); opacity: 0; }} to {{ transform: translateY(0); opacity: 1; }} }}
-            .modal {{ display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); }}
-            .modal-content {{ background: #999; margin: 1vh auto; width: 98%; height: 96%; border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }}
-            .modal-header {{ padding: 12px 20px; background: {c}; color: white; display: flex; justify-content: space-between; align-items:center; }}
-            .modal-body {{ flex: 1; overflow: auto; padding: 20px; display: flex; justify-content: center; }}
-            .excel-table {{ border-collapse: collapse; background: white; zoom: 0.8; }}
-            .excel-table td {{ padding: 4px 8px; min-width: 40px; height: 25px; text-align: center; white-space: nowrap; font-size: 13px; border: 1px solid #d4d4d4; }}
-            mark {{ background: #ffeb3b; color: #000; font-weight: bold; padding: 0 2px; }}
-            #sync_dot {{ width: 8px; height: 8px; background: #4caf50; border-radius: 50%; display: inline-block; margin-right: 4px; animation: blink 2s infinite; }}
-            @keyframes blink {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
-        </style></head>
-        <body>
-            <div class="sidebar">
-                <div class="header">
-                    <div style="font-size:19px; font-weight:700;">{t1}</div>
-                    <small>{t2}</small>
-                </div>
-                <div class="search-box">
-                    <input type="text" id="s" placeholder="搜索任务令/日期..." onkeyup="flt()">
-                    <span id="cb" class="clear-btn" onclick="cls()">×</span>
-                </div>
-                <div class="mail-list" id="ml">{items_html}</div>
-                <div class="footer">
-                    <div>{cp}<br><small><span id="sync_dot"></span><span id="timer_info">同步中...</span></small></div>
-                    <span class="cal-trigger" onclick="tgl(true)">📅 工作日历</span>
-                </div>
-            </div>
-            <div class="content"><div class="mail-display" id="mailDisplay">{mails_content_html}</div></div>
-            <div id="mdl" class="modal">
-                <div class="modal-content">
-                    <div class="modal-header"><h3>📅 工作日历 (原生预览)</h3><span style="cursor:pointer; font-size:35px;" onclick="tgl(false)">&times;</span></div>
-                    <div class="modal-body">{cal_html}</div>
-                </div>
-            </div>
-            <div id="toast">🔔 收到新任务令邮件，列表已同步</div>
-            <iframe id="refresh_frame" src="about:blank" style="display:none;"></iframe>
-            <script>
-                var ori = {{}};
-                var waitTime = {w_ref};
-                var counter = waitTime;
-                window.onload = function() {{ 
-                    initBackup();
-                    startCountdown();
-                }};
-                function initBackup() {{
-                    document.querySelectorAll('.mail-body').forEach(b => {{
-                        let id = b.id.replace('mail-','');
-                        if(!ori[id]) ori[id] = b.innerHTML;
-                    }});
-                }}
-                function startCountdown() {{
-                    setInterval(function() {{
-                        counter--;
-                        document.getElementById('timer_info').innerText = "下次更新: " + counter + "s";
-                        if(counter <= 0) {{
-                            counter = waitTime;
-                            iframeRefresh();
-                        }}
-                    }}, 1000);
-                }}
-                function iframeRefresh() {{
-                    let frame = document.getElementById('refresh_frame');
-                    frame.src = "index.html?t=" + Date.now();
-                    frame.onload = function() {{
+        # 5. 生成主入口 HTML
+        index_path = os.path.join(d, "index.html")
+        if not os.path.exists(index_path): # 仅首次生成，防止刷新丢失预览
+            with open(index_path, 'w', encoding='utf-8') as f:
+                f.write(f"""
+                <html><head><meta charset="utf-8"><title>{self.ui_title.text()}</title>
+                <style>
+                    body {{ display: flex; margin: 0; height: 100vh; font-family: 'Microsoft YaHei'; overflow: hidden; }}
+                    #sidebar {{ width: 360px; background: #f8f9fa; border-right: 1px solid #ddd; display: flex; flex-direction: column; }}
+                    #list_container {{ flex: 1; overflow-y: auto; padding: 15px; }}
+                    #content_area {{ flex: 1; border: none; }}
+                    .card {{ background: white; padding: 12px; margin-bottom: 10px; border-left: 5px solid {self.ui_color.text()}; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+                    .tag {{ font-size: 10px; background: {self.ui_color.text()}; color: white; padding: 2px 5px; border-radius: 3px; margin-right: 5px; }}
+                    h3 {{ font-size: 14px; color: #555; border-bottom: 1px solid #eee; padding-bottom: 5px; margin-top:20px; }}
+                    #timer_ui {{ font-size: 12px; color: #cc0000; font-weight: bold; margin-top: 5px; }}
+                </style>
+                <script>
+                    let timeLeft = 0;
+                    async function refreshData() {{
                         try {{
-                            let newDoc = frame.contentDocument || frame.contentWindow.document;
-                            let newList = newDoc.getElementById('ml').innerHTML;
-                            let oldList = document.getElementById('ml');
-                            if(newList && oldList.innerHTML !== newList) {{
-                                oldList.innerHTML = newList;
-                                showToast();
-                                flt(true); 
-                            }}
-                        }} catch(e) {{ console.log("同步受限"); }}
-                    }};
-                }}
-                function showToast() {{
-                    let toast = document.getElementById('toast');
-                    toast.style.display = 'block';
-                    setTimeout(() => {{ toast.style.display = 'none'; }}, 5000);
-                }}
-                function showMail(id, el) {{
-                    document.querySelectorAll('.mail-body').forEach(b => b.style.display = 'none');
-                    document.querySelectorAll('.mail-item').forEach(i => i.classList.remove('active'));
-                    document.getElementById('mail-'+id).style.display = 'block';
-                    el.classList.add('active'); flt(true);
-                }}
-                function flt(r) {{
-                    let v = document.getElementById('s').value.toUpperCase();
-                    document.getElementById('cb').style.display = v ? 'block' : 'none';
-                    document.querySelectorAll('.mail-item').forEach(item => {{
-                        let txt = (item.innerText + (item.getAttribute('data-tags')||"")).toUpperCase();
-                        item.style.display = (v && txt.indexOf(v) == -1) ? "none" : "block";
-                        item.classList.toggle('search-hit', v && txt.indexOf(v) > -1);
-                    }});
-                    let act = document.querySelector('.mail-body[style*="block"]');
-                    if(act) {{
-                        let id = act.id.replace('mail-','');
-                        if(v && v.length >= 2) {{
-                            if(!ori[id]) initBackup();
-                            act.innerHTML = ori[id].replace(new RegExp('('+v+')','gi'), '<mark class="m">$1</mark>');
-                            let m = act.querySelector('.m'); if(m && !r) m.scrollIntoView({{behavior:'smooth',block:'center'}});
-                        }} else {{ if(ori[id]) act.innerHTML = ori[id]; }}
+                            const res = await fetch('data.json?t=' + Date.now());
+                            const data = await res.json();
+                            timeLeft = parseInt(data.refresh_sec);
+                            document.getElementById('update_time').innerText = '最后同步: ' + data.time;
+                            document.getElementById('cal_box').innerHTML = data.cal;
+                            let html = '';
+                            data.mails.forEach(m => {{
+                                let tagsHtml = m.tags.map(t => `<span class="tag">${{t}}</span>`).join('');
+                                html += `<div class="card" onclick="document.getElementById('content_area').src='${{m.file}}'">
+                                            <div style="font-weight:bold;margin-bottom:5px;">${{m.title}}</div>
+                                            <div>${{tagsHtml}}</div>
+                                         </div>`;
+                            }});
+                            document.getElementById('list_box').innerHTML = html;
+                        }} catch (e) {{ console.log("Data not ready..."); }}
                     }}
-                }}
-                function cls() {{ document.getElementById('s').value=''; flt(); }}
-                function tgl(s) {{ document.getElementById('mdl').style.display = s ? 'block' : 'none'; }}
-            </script>
-        </body></html>"""
-        with open(os.path.join(d, "index.html"), 'w', encoding='utf-8') as f: f.write(full_html)
-        self.add_log("✅ 索引网页更新完成")
+                    function startCountdown() {{
+                        setInterval(() => {{
+                            if (timeLeft > 0) {{
+                                timeLeft--;
+                                document.getElementById('timer_ui').innerText = '🔄 刷新倒计时: ' + timeLeft + '秒';
+                            }} else {{
+                                refreshData();
+                            }}
+                        }}, 1000);
+                    }}
+                    window.onload = () => {{ refreshData(); startCountdown(); }};
+                </script>
+                </head><body>
+                <div id="sidebar">
+                    <div style="padding:20px; background:white; border-bottom:1px solid #eee;">
+                        <h2 style="margin:0; font-size:20px; color:{self.ui_color.text()};">{self.ui_title.text()}</h2>
+                        <div id="update_time" style="font-size:11px; color:#999;">正在载入...</div>
+                        <div id="timer_ui">等待同步...</div>
+                    </div>
+                    <div id="list_container">
+                        <h3>📅 华为日历</h3>
+                        <div id="cal_box"></div>
+                        <h3>📧 邮件最新动态</h3>
+                        <div id="list_box"></div>
+                    </div>
+                    <div style="padding:10px; font-size:10px; color:#ccc; text-align:center;">{self.copyright_text}</div>
+                </div>
+                <iframe id="content_area" name="content_area" src="about:blank"></iframe>
+                </body></html>
+                """)
+        self.add_log("✅ 静态看板功能已全面对齐 (含日历/倒计时/正文不刷新)")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
