@@ -30,31 +30,37 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V46.0")
-        self.resize(500, 880)
+        self.setWindowTitle("EDFA 看板后台 V48.0")
+        self.resize(520, 900)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
         def quick_edit(label, val, attr):
             l = QHBoxLayout(); lb = QLabel(label); lb.setFixedWidth(110); l.addWidget(lb)
             edit = QLineEdit(str(val)); setattr(self, attr, edit); l.addWidget(edit); layout.addLayout(l)
+        
         quick_edit("📂 共享路径", self.share_dir, "ui_path")
         quick_edit("📧 邮件关键词", self.target_kw, "ui_kw")
         quick_edit("🔍 提取正则", self.tag_regex, "ui_regex")
         quick_edit("🚩 网页大标题", self.web_title, "ui_title")
         quick_edit("📝 网页小字备注", self.web_sub_title, "ui_subtitle")
+        
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("⏱ 同步频率(分)")); self.ui_freq = QLineEdit(str(self.interval_min)); h1.addWidget(self.ui_freq)
         h1.addWidget(QLabel("🌐 网页刷新(秒)")); self.ui_web_freq = QLineEdit(str(self.web_refresh_sec)); h1.addWidget(self.ui_web_freq)
         layout.addLayout(h1)
+        
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("🔢 抓取数")); self.ui_count = QLineEdit(str(self.sync_count)); h2.addWidget(self.ui_count)
         h2.addWidget(QLabel("⏰ 时段")); self.ui_start = QLineEdit(str(self.start_hour)); h2.addWidget(self.ui_start)
         h2.addWidget(QLabel("-")); self.ui_end = QLineEdit(str(self.end_hour)); h2.addWidget(self.ui_end)
         layout.addLayout(h2)
+        
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
+        
         self.btn_apply = QPushButton("🚀 立即全量解析并同步"); self.btn_apply.setFixedHeight(50)
         self.btn_apply.clicked.connect(self.apply_settings); layout.addWidget(self.btn_apply)
+        
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True); layout.addWidget(self.log_area)
         self.setLayout(layout); self.restyle()
 
@@ -114,11 +120,13 @@ class OutlookMHTMaster(QWidget):
                     msg = email.message_from_binary_file(fp)
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
-                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(part.get_payload(decode=True).decode('utf-8','ignore'))
+                            raw_content = part.get_payload(decode=True).decode('utf-8','ignore')
+                            # 💡 预清理：移除邮件内联的固定宽度，实现一页全显
+                            clean_content = re.sub(r'width\s*[:=]\s*["\']?\d+(px|pt|in|cm)?["\']?', '', raw_content, flags=re.I)
+                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(clean_content)
                 os.remove(p_m)
             except: pass
         
-        # 🔥 Py 深度解析日历 + 自动缩放算法
         cal_html = "<p style='color:red;padding:20px;'>未找到 2026日历.xlsx</p>"
         auto_zoom = "1.0"
         for f_name in os.listdir(d):
@@ -126,12 +134,10 @@ class OutlookMHTMaster(QWidget):
                 try:
                     wb = openpyxl.load_workbook(os.path.join(d, f_name), data_only=True)
                     ws = wb.active
-                    
-                    # 计算缩放比例：根据总列数动态挤压
                     col_count = ws.max_column
                     if col_count > 30: auto_zoom = "0.55"
-                    elif col_count > 20: auto_zoom = "0.7"
-                    elif col_count > 12: auto_zoom = "0.85"
+                    elif col_count > 20: auto_zoom = "0.75"
+                    elif col_count > 12: auto_zoom = "0.9"
                     
                     rows_html = ""
                     for i, row in enumerate(ws.iter_rows(values_only=True)):
@@ -143,8 +149,7 @@ class OutlookMHTMaster(QWidget):
                             tag = "th" if i == 0 else "td"
                             row_content += f"<{tag} {style}>{val}</{tag}>"
                         rows_html += f"<tr>{row_content}</tr>"
-                    
-                    cal_html = f"<div id='zoomWrap' style='zoom:{auto_zoom}; -moz-transform:scale({auto_zoom}); -moz-transform-origin:top center;'><table class='cal-table'>{rows_html}</table></div>"
+                    cal_html = f"<div id='zoomWrap' style='zoom:{auto_zoom};'><table class='cal-table'>{rows_html}</table></div>"
                     self.add_log(f"📅 日历优化完成(Zoom:{auto_zoom})")
                     break
                 except Exception as e: self.add_log(f"解析失败: {e}")
@@ -158,6 +163,9 @@ class OutlookMHTMaster(QWidget):
         try: w_ref = int(self.ui_web_freq.text())
         except: w_ref = 60
         
+        # 💡 动态生成更新时间
+        update_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        
         items_html, mails_content_html = "", ""
         regex_ptr = self.ui_regex.text().strip()
 
@@ -169,84 +177,71 @@ class OutlookMHTMaster(QWidget):
             active_cls = "active" if i == 0 else ""
             items_html += f'<div class="mail-item {active_cls}" onclick="showMail(\'{i}\', this)" data-tags="{tags}"><b>{f[:-5]}</b><br><small>🕒 {mtime}</small></div>'
             disp = "block" if i == 0 else "none"
-            mails_content_html += f'<div id="mail-{i}" class="mail-body" style="display:{disp}">{content}</div>'
+            # 💡 注入强制覆盖宽度的 CSS 容器
+            mails_content_html += f'<div id="mail-{i}" class="mail-body" style="display:{disp}"><div class="mail-inner-wrapper">{content}</div></div>'
 
         full_html = f"""
         <!DOCTYPE html>
         <html><head><meta charset="utf-8"><meta http-equiv="refresh" content="{w_ref}"><title>{t1}</title>
         <style>
             body {{ font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; background:#f3f2f1; }}
-            
-            /* 📅 左侧功能导航条 */
-            .nav-bar {{ width: 52px; background: {c}; display: flex; flex-direction: column; align-items: center; padding-top: 15px; flex-shrink: 0; }}
-            .nav-item {{ width: 38px; height: 38px; margin-bottom: 18px; cursor: pointer; background: rgba(255,255,255,0.18); color: white; border: none; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 20px; transition: 0.2s; }}
-            .nav-item:hover {{ background: rgba(255,255,255,0.35); transform: scale(1.1); }}
-
-            .sidebar {{ width: 320px; background: white; border-right: 1px solid #edebe9; display: flex; flex-direction: column; flex-shrink: 0; }}
+            .sidebar {{ width: 340px; background: white; border-right: 1px solid #edebe9; display: flex; flex-direction: column; flex-shrink: 0; height: 100vh; }}
             .header {{ padding: 18px 16px; background: white; flex-shrink: 0; border-bottom: 1px solid #f3f2f1; }}
-            
-            /* 🔍 索引框 - 固定定位 */
             .search-box {{ padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3f2f1; position: relative; flex-shrink: 0; z-index: 100; }}
             .search-box input {{ width: 100%; padding: 8px 35px 8px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; box-sizing: border-box; font-size: 13px; }}
-            .clear-btn {{ position: absolute; right: 26px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #bbb; font-weight: bold; display: none; font-size: 20px; z-index: 101; }}
-            .clear-btn:hover {{ color: #666; }}
-
+            .clear-btn {{ position: absolute; right: 26px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #bbb; display: none; font-size: 20px; z-index: 101; }}
+            
             .mail-list {{ flex: 1; overflow-y: auto; background: white; }}
             .mail-item {{ padding: 14px 16px; border-bottom: 1px solid #f3f2f1; cursor: pointer; }}
-            .mail-item:hover {{ background: #faf9f8; }}
+            .mail-item.search-hit {{ background-color: #fff9c4 !important; border-left: 5px solid #fbc02d !important; font-weight: bold; }}
             .mail-item.active {{ border-left: 5px solid {c}; background: #eff6ef; }}
             
             .content {{ flex: 1; display: flex; flex-direction: column; min-width: 0; background: white; }}
-            .mail-display {{ flex: 1; overflow: auto; }}
-            .mail-body {{ padding: 0; min-width: max-content; }}
+            .mail-display {{ flex: 1; overflow-x: hidden; overflow-y: auto; }}
+            
+            /* 🔥 邮件正文一页全显示强制样式 */
+            .mail-body {{ width: 100%; box-sizing: border-box; }}
+            .mail-inner-wrapper {{ width: 100%; padding: 20px; box-sizing: border-box; overflow-x: hidden; }}
+            .mail-inner-wrapper * {{ max-width: 100% !important; word-break: break-all !important; box-sizing: border-box !important; }}
+            .mail-inner-wrapper table {{ width: 100% !important; table-layout: fixed !important; }}
 
-            /* 弹窗日历 - 一页全显示优化 */
+            .footer {{ font-size: 11px; color: #888; padding: 10px 16px; background: #fdfdfd; border-top: 1px solid #f3f2f1; display: flex; justify-content: space-between; align-items: center; }}
+            .update-tag {{ color: #aaa; font-style: italic; }}
+            .cal-trigger {{ cursor: pointer; color: {c}; font-weight: bold; }}
+            
             .modal {{ display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); }}
-            .modal-content {{ background: white; margin: 1vh auto; width: 98%; height: 96%; border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 15px 50px rgba(0,0,0,0.4); }}
-            .modal-header {{ padding: 12px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items:center; background: #fafafa; flex-shrink: 0; }}
+            .modal-content {{ background: white; margin: 1vh auto; width: 98%; height: 96%; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 15px 50px rgba(0,0,0,0.4); }}
+            .modal-header {{ padding: 12px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items:center; background: #fafafa; }}
             .modal-body {{ flex: 1; overflow: auto; padding: 10px; display: flex; justify-content: center; }}
-            
-            .cal-table {{ border-collapse: collapse; font-size: 13px; width: 100%; table-layout: auto; }}
-            .cal-table th {{ position: sticky; top: 0; background: #f1f1f1; z-index: 10; }}
+            .cal-table {{ border-collapse: collapse; font-size: 13px; width: 100%; }}
             .cal-table th, .cal-table td {{ border: 1px solid #ddd; padding: 5px 8px; text-align: center; white-space: nowrap; }}
-            
-            #zoomWrap {{ width: 100%; text-align: center; }}
-
-            .footer {{ font-size: 11px; color: #888; text-align: center; padding: 10px; background: #fdfdfd; border-top: 1px solid #f3f2f1; flex-shrink: 0; }}
         </style></head>
         <body>
-            <div class="nav-bar">
-                <button class="nav-item" onclick="tgl(true)" title="全屏查看 2026 日历">📅</button>
-                <button class="nav-item" onclick="location.reload()" title="刷新">🔄</button>
-            </div>
-            
             <div class="sidebar">
                 <div class="header">
                     <div style="font-size:19px; font-weight:700; color:{c};">{t1}</div>
-                    <div style="font-size:12px; color:#888; margin-top:3px;">{t2}</div>
+                    <div style="font-size:12px; color:#666; margin-top:3px;">{t2}</div>
                 </div>
                 <div class="search-box">
-                    <input type="text" id="s" placeholder="搜索工单/日期/关键字..." onkeyup="flt()">
+                    <input type="text" id="s" placeholder="搜索工单/日期..." onkeyup="flt()">
                     <span id="cb" class="clear-btn" onclick="cls()">×</span>
                 </div>
                 <div class="mail-list" id="ml">{items_html}</div>
-                <div class="footer">{cp}</div>
+                <div class="footer">
+                    <div>
+                        <span>{cp}</span><br>
+                        <span class="update-tag">最后更新: {update_time}</span>
+                    </div>
+                    <span class="cal-trigger" onclick="tgl(true)">📅 排产日历</span>
+                </div>
             </div>
-
-            <div class="content">
-                <div class="mail-display" id="mailDisplay">{mails_content_html}</div>
-            </div>
-
+            <div class="content"><div class="mail-display" id="mailDisplay">{mails_content_html}</div></div>
             <div id="mdl" class="modal">
                 <div class="modal-content">
-                    <div class="modal-header">
-                        <h3 style="margin:0; color:{c};">📅 2026 排产全景视图 (自动优化一屏显示)</h3>
-                        <span style="cursor:pointer; font-size:35px; color:#999;" onclick="tgl(false)">&times;</span>
-                    </div>
+                    <div class="modal-header"><h3 style="margin:0; color:{c};">📅 2026 排产日历 (全屏显示)</h3><span style="cursor:pointer; font-size:35px;" onclick="tgl(false)">&times;</span></div>
                     <div class="modal-body">{cal_html}</div>
                 </div>
             </div>
-
             <script>
                 function showMail(id, el) {{
                     document.querySelectorAll('.mail-body').forEach(b => b.style.display = 'none');
@@ -256,11 +251,16 @@ class OutlookMHTMaster(QWidget):
                 }}
                 function flt() {{
                     let v = document.getElementById('s').value.toUpperCase();
-                    document.getElementById('cb').style.display = v ? 'block' : 'none';
-                    document.querySelectorAll('.mail-item').forEach(item => {{
+                    let cb = document.getElementById('cb'); cb.style.display = v ? 'block' : 'none';
+                    let items = document.querySelectorAll('.mail-item'); let first = null;
+                    items.forEach(item => {{
+                        item.classList.remove('search-hit');
                         let txt = (item.innerText + item.getAttribute('data-tags')).toUpperCase();
-                        item.style.display = txt.indexOf(v) > -1 ? "block" : "none";
+                        if (v && txt.indexOf(v) > -1) {{
+                            item.style.display = "block"; item.classList.add('search-hit'); if(!first) first = item;
+                        }} else if(!v) {{ item.style.display = "block"; }} else {{ item.style.display = "none"; }}
                     }});
+                    if(first && v) first.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                 }}
                 function cls() {{ document.getElementById('s').value=''; flt(); document.getElementById('s').focus(); }}
                 function tgl(s) {{ document.getElementById('mdl').style.display = s ? 'block' : 'none'; }}
@@ -268,7 +268,7 @@ class OutlookMHTMaster(QWidget):
             </script>
         </body></html>"""
         with open(os.path.join(d, "index.html"), 'w', encoding='utf-8') as f: f.write(full_html)
-        self.add_log("✅ 索引网页已同步渲染 (全屏日历优化版)")
+        self.add_log(f"✅ 网页更新完成 (时间戳: {update_time})")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
