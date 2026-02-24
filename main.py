@@ -8,18 +8,18 @@ from PyQt5.QtCore import QTimer, Qt
 class OutlookMHTMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 默认参数设置 (保留您的所有 UI 定义) ---
+        # --- 默认参数设置 (保留您的 UI 定义) ---
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.tag_regex = r'\bEP[A-Z0-9]{9}\b' 
-        self.interval_min = 10     # 后台同步频率
-        self.web_refresh_sec = 60  # 网页刷新频率 (新增)
+        self.interval_min = 10     
+        self.web_refresh_sec = 60  
         self.sync_count = 3       
         self.start_hour = 9       
         self.end_hour = 12        
         self.theme_color = "#107c10" 
         self.web_title = "EDFA 排产看板"
-        self.web_sub_title = "网页频率可调版"
+        self.web_sub_title = "Excel 原生排版优化版"
         self.copyright_text = "© 2024-2026 R1231685 | 技术支持"
         
         self.init_ui()
@@ -29,45 +29,36 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板管理后台 V44.0")
+        self.setWindowTitle("EDFA 看板后台 V45.0")
         self.resize(500, 880)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
-
         def quick_edit(label, val, attr):
             l = QHBoxLayout(); lb = QLabel(label); lb.setFixedWidth(110); l.addWidget(lb)
             edit = QLineEdit(str(val)); setattr(self, attr, edit); l.addWidget(edit); layout.addLayout(l)
-
         quick_edit("📂 共享路径", self.share_dir, "ui_path")
         quick_edit("📧 邮件关键词", self.target_kw, "ui_kw")
         quick_edit("🔍 提取正则", self.tag_regex, "ui_regex")
         quick_edit("🚩 网页大标题", self.web_title, "ui_title")
         quick_edit("📝 网页小字备注", self.web_sub_title, "ui_subtitle")
-        
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("⏱ 同步频率(分)")); self.ui_freq = QLineEdit(str(self.interval_min)); h1.addWidget(self.ui_freq)
         h1.addWidget(QLabel("🌐 网页刷新(秒)")); self.ui_web_freq = QLineEdit(str(self.web_refresh_sec)); h1.addWidget(self.ui_web_freq)
         layout.addLayout(h1)
-
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("🔢 抓取数")); self.ui_count = QLineEdit(str(self.sync_count)); h2.addWidget(self.ui_count)
         h2.addWidget(QLabel("⏰ 时段")); self.ui_start = QLineEdit(str(self.start_hour)); h2.addWidget(self.ui_start)
         h2.addWidget(QLabel("-")); self.ui_end = QLineEdit(str(self.end_hour)); h2.addWidget(self.ui_end)
         layout.addLayout(h2)
-
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
-
-        self.btn_apply = QPushButton("🚀 部署看板 (同步更新网页刷新率)")
-        self.btn_apply.setFixedHeight(50); self.btn_apply.clicked.connect(self.apply_settings)
-        layout.addWidget(self.btn_apply)
-
-        self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
-        layout.addWidget(self.log_area); self.setLayout(layout); self.restyle()
+        self.btn_apply = QPushButton("🚀 立即全量解析并同步"); self.btn_apply.setFixedHeight(50)
+        self.btn_apply.clicked.connect(self.apply_settings); layout.addWidget(self.btn_apply)
+        self.log_area = QTextEdit(); self.log_area.setReadOnly(True); layout.addWidget(self.log_area)
+        self.setLayout(layout); self.restyle()
 
     def init_tray(self):
-        self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.tray = QSystemTrayIcon(self); self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
         tm = QMenu(); tm.addAction("显示", self.showNormal); tm.addAction("退出", QApplication.instance().quit)
         self.tray.setContextMenu(tm); self.tray.show()
         self.tray.activated.connect(lambda r: self.showNormal() if r == QSystemTrayIcon.DoubleClick else None)
@@ -80,7 +71,7 @@ class OutlookMHTMaster(QWidget):
         self.setStyleSheet(f"QPushButton{{background:{c};color:white;font-weight:bold;border-radius:4px;}}")
 
     def add_log(self, txt): self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {str(txt)}")
-    def apply_settings(self): self.restyle(); self.add_log("⚙️ 网页参数已重载..."); self.run_cycle()
+    def apply_settings(self): self.restyle(); self.add_log("⚙️ 配置同步并重绘..."); self.run_cycle()
 
     def run_cycle(self):
         now_h = int(time.strftime("%H"))
@@ -104,7 +95,7 @@ class OutlookMHTMaster(QWidget):
                 $n = ($m.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_').Trim()
                 $m.SaveAs((Join-Path "{d}" "$n.mht"), 10)
             }}
-        }} catch {{ }}
+        }} catch {{ }} finally {{ if ($ol) {{ [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ol) | Out-Null }} }}
         """
         try:
             ps_b64 = base64.b64encode(ps_cmd.encode('utf-16-le')).decode('ascii')
@@ -122,18 +113,19 @@ class OutlookMHTMaster(QWidget):
                     msg = email.message_from_binary_file(fp)
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
-                            raw = part.get_payload(decode=True).decode('utf-8','ignore')
-                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(raw)
-                            break
+                            with open(p_h, 'w', encoding='utf-8') as hw: hw.write(part.get_payload(decode=True).decode('utf-8','ignore'))
                 os.remove(p_m)
             except: pass
         
-        cal_html = "<p style='color:red;'>未找到 2026日历.xlsx</p>"
+        # 🔥 Excel 深度脱水解析 (解决 NaN 与 Unnamed)
+        cal_html = "<p style='color:red;'>未在目录找到 [2026日历.xlsx]</p>"
         for f in os.listdir(d):
-            if "2026日历" in f and f.endswith(('.xlsx', '.xls')):
+            if "2026日历" in f and f.lower().endswith(('.xlsx', '.xls')):
                 try:
                     df = pd.read_excel(os.path.join(d, f))
+                    # 1. 抹除 Unnamed 表头
                     df.columns = ["" if "Unnamed" in str(col) else col for col in df.columns]
+                    # 2. 染色逻辑
                     def color_weekend(v):
                         if pd.isna(v) or str(v).strip() == "": return ""
                         try:
@@ -141,10 +133,13 @@ class OutlookMHTMaster(QWidget):
                             if dt.weekday() >= 5: return 'color:red; font-weight:bold; background-color:#fff0f0;'
                         except: pass
                         return ""
+                    # 3. 渲染 HTML 并强制清除干扰样式
                     raw_table = df.style.applymap(color_weekend).to_html(classes='cal-table', index=False, na_rep="")
-                    cal_html = re.sub(r'style="[^"]*width[^"]*"', '', raw_table) 
+                    cal_html = re.sub(r'style="[^"]*width:[^;]+;?"', '', raw_table)
+                    cal_html = re.sub(r'style="[^"]*white-space:[^;]+;?"', '', cal_html) 
+                    self.add_log(f"📅 日历已同步解析: {f}")
                     break
-                except: pass
+                except Exception as e: self.add_log(f"解析失败: {e}")
         self.build_index(cal_html)
 
     def build_index(self, cal_html):
@@ -152,11 +147,8 @@ class OutlookMHTMaster(QWidget):
         all_files = [f for f in os.listdir(d) if f.endswith('.html') and f != 'index.html']
         all_files.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
         c, t1, t2, cp = self.ui_color.text().strip(), self.ui_title.text().strip(), self.ui_subtitle.text().strip(), self.ui_copy.text().strip()
-        
-        # 读取 UI 设定的网页刷新频率
         try: w_ref = int(self.ui_web_freq.text())
         except: w_ref = 60
-
         items_html, mails_data_html, search_db = "", "", {}
         for i, f in enumerate(all_files):
             p = os.path.join(d, f)
@@ -167,8 +159,8 @@ class OutlookMHTMaster(QWidget):
             tag_ui = "".join([f'<span class="et" onclick="fastGo(\'{x}\')">{x}</span>' for x in tags[:5]])
             items_html += f'<div class="item" id="li_m_{i}" onclick="jump(\'m_{i}\', this)"><div class="ti">{f[:-5]}</div><div class="tags">{tag_ui}</div></div>'
             mails_data_html += f'<div id="m_{i}" class="m-box"><div class="m-bar" style="border-left:5px solid {c}">{f[:-5]}</div><div class="m-body">{raw_h}</div></div>'
-
         db_b64 = base64.b64encode(json.dumps(search_db).encode('utf-8')).decode('ascii')
+        
         index_tpl = f'''
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{t1}</title>
         <meta http-equiv="refresh" content="{w_ref}"> 
@@ -183,33 +175,39 @@ class OutlookMHTMaster(QWidget):
             .m-box {{ background:#fff; margin-bottom:30px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }}
             .m-bar {{ padding:10px; background:#fafafa; font-weight:bold; }}
             .m-body {{ padding:15px; font-size:14px; overflow-x:hidden; }}
-            .cal-table {{ border-collapse:collapse; width:100% !important; table-layout: fixed; font-size:12px; border: 1px solid #ccc; }}
-            .cal-table th {{ background:#f2f2f2; border:1px solid #ccc; padding:6px; font-weight:bold; }}
-            .cal-table td {{ border:1px solid #ddd; padding:6px; text-align:center; word-wrap: break-word; white-space: normal !important; overflow: hidden; }}
+            /* 🚀 核心：单行显示，自动压缩字号，禁止换行 */
+            .cal-table {{ border-collapse:collapse; width:100% !important; table-layout: auto; border: 1px solid #ccc; }}
+            .cal-table th, .cal-table td {{ border:1px solid #ddd; padding:4px 2px; text-align:center; white-space: nowrap !important; font-size: 10px; letter-spacing: -0.5px; overflow: hidden; text-overflow: ellipsis; }}
+            .cal-table th {{ background:#f2f2f2; font-weight:bold; position: sticky; top: 0; }}
             mark {{ background: yellow; color: black; font-weight:bold; }}
             .active {{ background:#e8f5e9 !important; border-right:5px solid {c}; }}
             .cal-btn {{ margin:10px; padding:12px; background:#333; color:#fff; text-align:center; border-radius:4px; cursor:pointer; font-weight:bold; }}
             #calModal {{ display:none; position:fixed; z-index:999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.8); align-items:center; justify-content:center; }}
-            .cal-card {{ background:#fff; width:95%; max-height:90%; padding:20px; border-radius:8px; overflow-y:auto; position:relative; }}
+            .cal-card {{ background:#fff; width:98%; max-height:92%; padding:20px; border-radius:8px; overflow-y:auto; overflow-x: hidden; position:relative; }}
         </style></head>
         <body>
             <div id="side">
-                <div class="head"><strong>{t1}</strong><br><small>{t2}</small><input type="text" id="q" placeholder="输入 EP号 定位内容..." oninput="doSearch(this.value)"></div>
+                <div class="head"><strong>{t1}</strong><br><small>{t2}</small><input type="text" id="q" placeholder="输入搜索词..." oninput="doSearch(this.value)"></div>
                 <div style="flex:1; overflow-y:auto;">{items_html}</div>
-                <div class="cal-btn" onclick="toggleCal(true)">📅 2026 华为工作日历 (自适应)</div>
+                <div class="cal-btn" onclick="toggleCal(true)">📅 2026 华为工作日历 (极致缩放版)</div>
                 <div style="padding:10px; font-size:10px; color:#999; text-align:center;">{cp}</div>
             </div>
             <div id="main">{mails_data_html}</div>
             <div id="calModal" onclick="if(event.target==this) toggleCal(false)">
                 <div class="cal-card"><span onclick="toggleCal(false)" style="position:absolute;right:15px;top:10px;cursor:pointer;font-size:24px;">&times;</span>
-                <h3 style="margin-top:0;">📅 2026 华为工作日历 (Excel 实时解析)</h3>{cal_html}</div>
+                <h3 style="margin:0 0 15px 0;">📅 2026 华为工作日历 (Excel 数据源)</h3>{cal_html}</div>
             </div>
             <script>
                 const db = JSON.parse(atob("{db_b64}"));
+                window.onload = function() {{
+                    const saved = localStorage.getItem('lastSearch');
+                    if(saved) {{ document.getElementById('q').value = saved; doSearch(saved); }}
+                }};
                 function toggleCal(s) {{ document.getElementById('calModal').style.display = s ? 'flex' : 'none'; }}
                 function fastGo(v) {{ document.getElementById('q').value = v; doSearch(v); }}
                 function doSearch(kw) {{
-                    const v = kw.toLowerCase().trim(); let first = null;
+                    const v = kw.toLowerCase().trim(); localStorage.setItem('lastSearch', v);
+                    let first = null;
                     Object.keys(db).forEach(id => {{
                         const match = db[id].includes(v); document.getElementById('li_'+id).style.display = match ? 'block' : 'none';
                         if(match && !first) first = id;
@@ -233,7 +231,7 @@ class OutlookMHTMaster(QWidget):
         with open(tmp_p, 'w', encoding='utf-8') as f: f.write(index_tpl)
         if os.path.exists(final_p): os.remove(final_p)
         os.rename(tmp_p, final_p)
-        self.add_log(f"🌍 看板已原子更新 (网页频率: {w_ref}s)")
+        self.add_log("🌍 看板网页已同步 (已解决NaN乱码并开启单行缩放)")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); win = OutlookMHTMaster(); win.show(); sys.exit(app.exec_())
