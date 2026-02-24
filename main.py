@@ -30,7 +30,7 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V50.1")
+        self.setWindowTitle("EDFA 看板后台 V50.5")
         self.resize(520, 900)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
@@ -72,7 +72,7 @@ class OutlookMHTMaster(QWidget):
         self.setStyleSheet(f"QPushButton{{background:{c};color:white;font-weight:bold;border-radius:4px;}}")
 
     def add_log(self, txt): self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {str(txt)}")
-    def apply_settings(self): self.restyle(); self.add_log("⚙️ 重新执行同步..."); self.run_cycle()
+    def apply_settings(self): self.restyle(); self.add_log("⚙️ 重新同步中..."); self.run_cycle()
 
     def run_cycle(self):
         now_h = int(time.strftime("%H"))
@@ -120,62 +120,45 @@ class OutlookMHTMaster(QWidget):
                 os.remove(p_m)
             except: pass
         
-        # --- 智能日历：1-7 排序 & 一屏全显 ---
+        # --- Excel 1:1 原生预览解析 ---
         cal_html = ""
-        now_dt = datetime.datetime.now()
-        today_str = now_dt.strftime('%Y-%m-%d')
-        WORK_DATES_2026 = ["2026-01-04", "2026-02-14", "2026-02-28", "2026-05-09", "2026-09-20", "2026-10-10", "2026-10-11"]
-
         for f_name in os.listdir(d):
             if "2026日历" in f_name and f_name.lower().endswith('.xlsx'):
                 try:
                     wb = openpyxl.load_workbook(os.path.join(d, f_name), data_only=True)
                     ws = wb.active
+                    merged_cells = ws.merged_cells.ranges
                     rows_html = ""
-                    data = list(ws.iter_rows(values_only=True))
-                    if not data: continue
-                    
-                    # 💡 自动缩放算法：根据行数和列数动态计算 zoom
-                    max_rows, max_cols = len(data), len(data[0])
-                    cal_zoom = round(min(1.0, 15 / max_rows, 18 / max_cols), 2)
-                    if cal_zoom < 0.5: cal_zoom = 0.5 # 保底缩放
-
-                    for i, row in enumerate(data):
-                        if not any(row): continue
-                        # 💡 强制 1234567 排序 (假设原表 0 位是周日)
-                        try: ordered_row = [row[1], row[2], row[3], row[4], row[5], row[6], row[0]]
-                        except: ordered_row = row 
-                        
+                    for row in ws.iter_rows():
                         row_content = ""
-                        for cell_val in ordered_row:
-                            val = "" if cell_val is None else str(cell_val)
-                            style, cls = "", ""
-                            if i > 0 and cell_val:
-                                try:
-                                    dt = cell_val if isinstance(cell_val, datetime.datetime) else pd.to_datetime(val)
-                                    dt_str = dt.strftime('%Y-%m-%d')
-                                    if dt_str == today_str:
-                                        cls = "today-cell"
-                                        style = "background:#fff9e6; outline:2px solid #ffba00; font-weight:bold; box-shadow: 0 0 10px #ffba00;"
-                                    elif dt_str in WORK_DATES_2026:
-                                        style = "background:#005a9e; color:white; font-weight:bold;"
-                                    elif dt.weekday() >= 5:
-                                        style = "background:#fff0f0; color:#e81123; font-weight:bold;"
-                                    else:
-                                        style = "background:#f9fff9; color:#333;"
-                                    if (dt + datetime.timedelta(days=1)).month != dt.month:
-                                        style += "border-bottom:4px solid #107c10;"
-                                except:
-                                    if "休" in val: style = "background:#fff4ce; color:#995d00; border:1px dashed #995d00;"
-                                    if "班" in val: style = "background:#005a9e; color:white;"
-
-                            tag = "th" if i == 0 else "td"
-                            row_content += f"<{tag} class='{cls}' style='{style}'>{val}</{tag}>"
+                        for cell in row:
+                            is_merged = False
+                            for merged in merged_cells:
+                                if cell.coordinate in merged and cell.coordinate != merged.start_cell.coordinate:
+                                    is_merged = True; break
+                            if is_merged: continue
+                            val = "" if cell.value is None else str(cell.value)
+                            bg = "white"
+                            if cell.fill and hasattr(cell.fill, 'start_color') and cell.fill.start_color.index != "00000000":
+                                try: bg = f"#{cell.fill.start_color.rgb[2:]}"
+                                except: pass
+                            color = "black"
+                            if cell.font and cell.font.color and hasattr(cell.font.color, 'rgb'):
+                                try: color = f"#{cell.font.color.rgb[2:]}"
+                                except: pass
+                            colspan, rowspan = 1, 1
+                            for m in merged_cells:
+                                if cell.coordinate == m.start_cell.coordinate:
+                                    colspan, rowspan = m.size['columns'], m.size['rows']; break
+                            style = f"background:{bg};color:{color};border:1px solid #d4d4d4;"
+                            if val == datetime.datetime.now().strftime('%d'):
+                                style += "outline:3px solid #ffba00;outline-offset:-3px;"
+                            row_content += f"<td style='{style}' colspan='{colspan}' rowspan='{rowspan}'>{val}</td>"
                         rows_html += f"<tr>{row_content}</tr>"
-                    cal_html = f"<div id='calZoomWrapper' style='zoom:{cal_zoom}; transform-origin: top center;'><table class='cal-table'>{rows_html}</table></div>"
-                    self.add_log(f"📅 工作日历一页显示优化(Zoom:{cal_zoom})")
+                    cal_html = f"<table class='excel-table'>{rows_html}</table>"
+                    self.add_log(f"📅 工作日历 1:1 解析完成: {f_name}")
                     break
-                except Exception as e: self.add_log(f"日历解析失败: {e}")
+                except Exception as e: self.add_log(f"解析失败: {e}")
         self.build_index(cal_html)
 
     def build_index(self, cal_html):
@@ -190,10 +173,9 @@ class OutlookMHTMaster(QWidget):
 
         for i, f in enumerate(all_files):
             file_path = os.path.join(d, f)
-            mtime = time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(file_path)))
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as tf: content = tf.read()
             tags = " ".join(list(set(re.findall(regex_ptr, content))))
-            items_html += f'<div class="mail-item {"active" if i==0 else ""}" onclick="showMail(\'{i}\', this)" data-tags="{tags}"><b>{f[:-5]}</b><br><small>🕒 {mtime}</small></div>'
+            items_html += f'<div class="mail-item {"active" if i==0 else ""}" onclick="showMail(\'{i}\', this)" data-tags="{tags}"><b>{f[:-5]}</b></div>'
             mails_content_html += f'<div id="mail-{i}" class="mail-body" style="display:{"block" if i==0 else "none"}"><div class="mail-inner-zoom">{content}</div></div>'
 
         full_html = f"""
@@ -201,34 +183,43 @@ class OutlookMHTMaster(QWidget):
         <html><head><meta charset="utf-8"><title>{t1}</title>
         <style>
             body {{ font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; background:#f3f2f1; }}
-            .sidebar {{ width: 340px; background: white; border-right: 1px solid #edebe9; display: flex; flex-direction: column; flex-shrink: 0; height: 100vh; }}
-            .header {{ padding: 18px 16px; background: white; border-bottom: 1px solid #f3f2f1; }}
-            .search-box {{ padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3f2f1; position: sticky; top: 0; z-index: 100; }}
-            .search-box input {{ width: 100%; padding: 8px 35px 8px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; box-sizing: border-box; }}
+            .sidebar {{ width: 340px; background: white; border-right: 1px solid #edebe9; display: flex; flex-direction: column; flex-shrink: 0; }}
+            
+            /* 🚩 网页标题栏改色背景 */
+            .header {{ padding: 20px 16px; background: {c}; color: white; flex-shrink: 0; }}
+            .header small {{ color: rgba(255,255,255,0.8); }}
+            
+            .search-box {{ padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3f2f1; position: relative; }}
+            .search-box input {{ width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; box-sizing: border-box; }}
             .clear-btn {{ position: absolute; right: 26px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #bbb; display: none; font-size: 20px; }}
+            
             .mail-list {{ flex: 1; overflow-y: auto; }}
             .mail-item {{ padding: 14px 16px; border-bottom: 1px solid #f3f2f1; cursor: pointer; }}
-            .mail-item.search-hit {{ background-color: #fff9c4 !important; border-left: 5px solid #fbc02d !important; font-weight: bold; }}
+            .mail-item.search-hit {{ background-color: #fff9c4 !important; border-left: 5px solid #fbc02d !important; }}
             .mail-item.active {{ border-left: 5px solid {c}; background: #eff6ef; }}
+            
             .content {{ flex: 1; display: flex; flex-direction: column; min-width: 0; background: white; }}
-            .mail-display {{ flex: 1; overflow: auto; background: #f8f9fa; position: relative; }}
-            .mail-inner-zoom {{ padding: 25px; zoom: 0.9; min-width: fit-content; background: white; margin: 15px auto; width: 95%; box-shadow: 0 2px 15px rgba(0,0,0,0.05); border-radius: 4px; }}
-            .mail-inner-zoom table {{ border-collapse: collapse; min-width: 600px; }}
-            .mail-inner-zoom td, .mail-inner-zoom th {{ border: 1px solid #ddd; padding: 5px 10px; font-size: 13px; white-space: nowrap; }}
+            .mail-display {{ flex: 1; overflow: auto; background: #f8f9fa; }}
+            .mail-inner-zoom {{ padding: 25px; zoom: 0.9; background: white; margin: 15px auto; width: 95%; box-shadow: 0 2px 15px rgba(0,0,0,0.05); }}
+            
             .footer {{ font-size: 11px; color: #888; padding: 10px 16px; background: #fdfdfd; border-top: 1px solid #f3f2f1; display: flex; justify-content: space-between; align-items: center; }}
             .cal-trigger {{ cursor: pointer; color: {c}; font-weight: bold; text-decoration: underline; }}
-            mark {{ background: #ffeb3b; color: #000; font-weight: bold; padding: 0 2px; border-radius: 2px; }}
+            
+            /* 📅 工作日历 1:1 原生排版 */
             .modal {{ display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); }}
-            .modal-content {{ background: white; margin: 1vh auto; width: 98%; height: 96%; border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }}
-            .modal-body {{ flex: 1; overflow: hidden; padding: 10px; display: flex; justify-content: center; align-items: center; }}
-            .cal-table {{ border-collapse: separate; border-spacing: 2px; width: 100%; }}
-            .cal-table th, .cal-table td {{ padding: 8px; border-radius: 4px; text-align: center; border: 1px solid #f3f2f1; white-space: nowrap; }}
+            .modal-content {{ background: #999; margin: 1vh auto; width: 98%; height: 96%; border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }}
+            .modal-header {{ padding: 12px 20px; background: {c}; color: white; display: flex; justify-content: space-between; align-items:center; }}
+            .modal-body {{ flex: 1; overflow: auto; padding: 20px; display: flex; justify-content: center; }}
+            .excel-table {{ border-collapse: collapse; background: white; zoom: 0.8; box-shadow: 0 0 20px rgba(0,0,0,0.2); }}
+            .excel-table td {{ padding: 4px 8px; min-width: 40px; height: 25px; text-align: center; white-space: nowrap; font-size: 13px; }}
+            
+            mark {{ background: #ffeb3b; color: #000; font-weight: bold; }}
         </style></head>
         <body>
             <div class="sidebar">
                 <div class="header">
-                    <div style="font-size:19px; font-weight:700; color:{c};">{t1}</div>
-                    <div style="font-size:12px; color:#666; margin-top:3px;">{t2}</div>
+                    <div style="font-size:19px; font-weight:700;">{t1}</div>
+                    <small>{t2}</small>
                 </div>
                 <div class="search-box">
                     <input type="text" id="s" placeholder="搜索任务令/日期..." onkeyup="flt()">
@@ -236,93 +227,56 @@ class OutlookMHTMaster(QWidget):
                 </div>
                 <div class="mail-list" id="ml">{items_html}</div>
                 <div class="footer">
-                    <div><span>{cp}</span><br><small style="color:#aaa;">更新: {update_time}</small></div>
+                    <div>{cp}<br><small>更新: {update_time}</small></div>
                     <span class="cal-trigger" onclick="tgl(true)">📅 工作日历</span>
                 </div>
             </div>
             <div class="content"><div class="mail-display" id="mailDisplay">{mails_content_html}</div></div>
             <div id="mdl" class="modal">
                 <div class="modal-content">
-                    <div style="padding:15px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center;">
-                        <h3 style="margin:0; color:{c};">📅 工作日历 (一页全显示版)</h3>
-                        <span style="cursor:pointer; font-size:35px;" onclick="tgl(false)">&times;</span>
-                    </div>
+                    <div class="modal-header"><h3>📅 华为日历 (原生预览)</h3><span style="cursor:pointer; font-size:35px;" onclick="tgl(false)">&times;</span></div>
                     <div class="modal-body">{cal_html}</div>
                 </div>
             </div>
             <script>
-                var originalContents = {{}};
-                var webRefreshSec = {w_ref};
-
-                window.onload = function() {{
-                    setInterval(silentRefresh, webRefreshSec * 1000);
-                    backupAll();
+                var ori = {{}};
+                window.onload = function() {{ 
+                    setInterval(refresh, {w_ref}*1000); 
+                    document.querySelectorAll('.mail-body').forEach(b => ori[b.id.replace('mail-','')] = b.innerHTML);
                 }};
-
-                function backupAll() {{
-                    document.querySelectorAll('.mail-body').forEach(b => {{
-                        let id = b.id.replace('mail-', '');
-                        if(!originalContents[id]) originalContents[id] = b.innerHTML;
-                    }});
-                }}
-
-                function silentRefresh() {{
-                    fetch(window.location.href + '?t=' + Date.now())
-                    .then(res => res.text())
-                    .then(html => {{
-                        let doc = new DOMParser().parseFromString(html, 'text/html');
-                        let newList = doc.getElementById('ml').innerHTML;
-                        if(document.getElementById('ml').innerHTML !== newList) {{
-                            document.getElementById('ml').innerHTML = newList;
-                            flt(true);
-                        }}
-                    }});
-                }}
-
+                function refresh() {{ fetch(location.href+'?t='+Date.now()).then(res=>res.text()).then(h=>{{
+                    let d = new DOMParser().parseFromString(h,'text/html');
+                    document.getElementById('ml').innerHTML = d.getElementById('ml').innerHTML; flt(true);
+                }});}}
                 function showMail(id, el) {{
                     document.querySelectorAll('.mail-body').forEach(b => b.style.display = 'none');
                     document.querySelectorAll('.mail-item').forEach(i => i.classList.remove('active'));
                     document.getElementById('mail-'+id).style.display = 'block';
-                    el.classList.add('active');
-                    document.getElementById('mailDisplay').scrollTop = 0;
-                    flt(true);
+                    el.classList.add('active'); flt(true);
                 }}
-
-                function flt(isRefresh) {{
+                function flt(r) {{
                     let v = document.getElementById('s').value.toUpperCase();
                     document.getElementById('cb').style.display = v ? 'block' : 'none';
-                    let items = document.querySelectorAll('.mail-item');
-                    let first = null;
-                    items.forEach(item => {{
-                        item.classList.remove('search-hit');
+                    document.querySelectorAll('.mail-item').forEach(item => {{
                         let txt = (item.innerText + item.getAttribute('data-tags')).toUpperCase();
-                        if (v && txt.indexOf(v) > -1) {{
-                            item.style.display = "block"; item.classList.add('search-hit');
-                            if(!first) first = item;
-                        }} else if(!v) {{ item.style.display = "block"; }} else {{ item.style.display = "none"; }}
+                        item.style.display = (v && txt.indexOf(v) == -1) ? "none" : "block";
+                        item.classList.toggle('search-hit', v && txt.indexOf(v) > -1);
                     }});
-                    if(first && v && !isRefresh) first.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-
-                    let active = document.querySelector('.mail-body[style*="block"]');
-                    if(active) {{
-                        let id = active.id.replace('mail-', '');
-                        if(!originalContents[id]) originalContents[id] = active.innerHTML;
+                    let act = document.querySelector('.mail-body[style*="block"]');
+                    if(act) {{
+                        let id = act.id.replace('mail-','');
                         if(v && v.length >= 2) {{
-                            let reg = new RegExp('(' + v + ')', 'gi');
-                            active.innerHTML = originalContents[id].replace(reg, '<mark class="m-hit">$1</mark>');
-                            let m = active.querySelector('.m-hit');
-                            if(m && !isRefresh) m.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-                        }} else {{ active.innerHTML = originalContents[id]; }}
+                            act.innerHTML = ori[id].replace(new RegExp('('+v+')','gi'), '<mark class="m">$1</mark>');
+                            let m = act.querySelector('.m'); if(m && !r) m.scrollIntoView({{behavior:'smooth',block:'center'}});
+                        }} else act.innerHTML = ori[id];
                     }}
                 }}
-
-                function cls() {{ document.getElementById('s').value=''; flt(); document.getElementById('s').focus(); }}
+                function cls() {{ document.getElementById('s').value=''; flt(); }}
                 function tgl(s) {{ document.getElementById('mdl').style.display = s ? 'block' : 'none'; }}
-                window.onclick = function(e) {{ if(e.target == document.getElementById('mdl')) tgl(false); }}
             </script>
         </body></html>"""
         with open(os.path.join(d, "index.html"), 'w', encoding='utf-8') as f: f.write(full_html)
-        self.add_log(f"✅ 网页静默同步完成 (一页显示已优化)")
+        self.add_log(f"✅ 网页主题色同步完成: {c}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
