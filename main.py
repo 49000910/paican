@@ -1,4 +1,5 @@
 import sys, os, re, time, subprocess, base64, email, json
+import pandas as pd
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QSystemTrayIcon, QMenu, QAction, QStyle)
@@ -7,7 +8,7 @@ from PyQt5.QtCore import QTimer, Qt
 class OutlookMHTMaster(QWidget):
     def __init__(self):
         super().__init__()
-        # --- 默认参数设置（保留您的所有原始定义） ---
+        # --- 默认参数设置 (保留您的所有 UI 原始定义) ---
         self.share_dir = r'\\10.1.93.32\DT_HU_RDteam_F\视频\Z\ZOUQIU\paican'
         self.target_kw = 'EDFA' 
         self.tag_regex = r'\bEP[A-Z0-9]{9}\b' 
@@ -27,16 +28,14 @@ class OutlookMHTMaster(QWidget):
         QTimer.singleShot(2000, self.run_cycle)
 
     def init_ui(self):
-        self.setWindowTitle("EDFA 看板后台 V32.0 - 日历集成版")
+        self.setWindowTitle("EDFA 看板管理后台 V40.0 - 全功能集成版")
         self.resize(500, 850)
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 15, 15, 15)
 
         def quick_edit(label, val, attr):
-            l = QHBoxLayout()
-            lb = QLabel(label); lb.setFixedWidth(100); l.addWidget(lb)
-            edit = QLineEdit(str(val)); setattr(self, attr, edit)
-            l.addWidget(edit); layout.addLayout(l)
+            l = QHBoxLayout(); lb = QLabel(label); lb.setFixedWidth(100); l.addWidget(lb)
+            edit = QLineEdit(str(val)); setattr(self, attr, edit); l.addWidget(edit); layout.addLayout(l)
 
         quick_edit("📂 共享路径", self.share_dir, "ui_path")
         quick_edit("📧 邮件关键词", self.target_kw, "ui_kw")
@@ -57,7 +56,7 @@ class OutlookMHTMaster(QWidget):
         quick_edit("🎨 主题颜色", self.theme_color, "ui_color")
         quick_edit("🔒 版权内容", self.copyright_text, "ui_copy")
 
-        self.btn_apply = QPushButton("🚀 立即部署看板 (含2026日历)")
+        self.btn_apply = QPushButton("🚀 立即部署全量看板 (含Excel日历智能变红)")
         self.btn_apply.setFixedHeight(50); self.btn_apply.clicked.connect(self.apply_settings)
         layout.addWidget(self.btn_apply)
 
@@ -67,8 +66,14 @@ class OutlookMHTMaster(QWidget):
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        tm = QMenu(); tm.addAction("显示", self.showNormal); tm.addAction("退出", QApplication.instance().quit)
+        tm = QMenu()
+        tm.addAction("显示主界面", self.showNormal)
+        tm.addAction("退出程序", QApplication.instance().quit)
         self.tray.setContextMenu(tm); self.tray.show()
+        self.tray.activated.connect(lambda r: self.showNormal() if r == QSystemTrayIcon.DoubleClick else None)
+
+    def closeEvent(self, event):
+        if self.tray.isVisible(): self.hide(); event.ignore()
 
     def restyle(self):
         c = self.ui_color.text().strip() or "#107c10"
@@ -76,7 +81,7 @@ class OutlookMHTMaster(QWidget):
 
     def add_log(self, txt): self.log_area.append(f"[{time.strftime('%H:%M:%S')}] {str(txt)}")
 
-    def apply_settings(self): self.restyle(); self.add_log("⚙️ 配置已同步..."); self.run_cycle()
+    def apply_settings(self): self.restyle(); self.add_log("⚙️ 全功能配置已同步..."); self.run_cycle()
 
     def run_cycle(self):
         now_h = int(time.strftime("%H"))
@@ -94,9 +99,16 @@ class OutlookMHTMaster(QWidget):
         except: c_num = 3
         ps_cmd = f"""
         try {{
+            if (!(Test-Path "{d}")) {{ New-Item -ItemType Directory -Path "{d}" -Force | Out-Null }}
             $ol = New-Object -ComObject Outlook.Application
-            $it = $ol.GetNamespace("MAPI").GetDefaultFolder(6).Items | Where-Object {{ $_.ReceivedTime -gt (Get-Date).AddDays(-3) -and ($_.Subject -like "*{k}*" -or $_.SenderName -like "*{k}*") }} | Sort-Object ReceivedTime -Descending | Select-Object -First {c_num}
-            if ($it) {{ foreach($m in $it) {{ $n = ($m.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_').Trim(); $p = Join-Path "{d}" "$n.mht"; if (!(Test-Path $p)) {{ $m.SaveAs($p, 10) }} }} }}
+            $it = $ol.GetNamespace("MAPI").GetDefaultFolder(6).Items | Where-Object {{ $_.ReceivedTime -gt (Get-Date).AddDays(-3) -and ($_.Subject -like "*{k}*") }} | Sort-Object ReceivedTime -Descending | Select-Object -First {c_num}
+            foreach($m in $it) {{
+                $n = ($m.Subject -replace '[\\x00-\\x1f\\\\/:*?"<>|]', '_').Trim()
+                $m.SaveAs((Join-Path "{d}" "$n.mht"), 10)
+                foreach($at in $m.Attachments) {{
+                    if ($at.FileName -match '\\.(xlsx|xls)$') {{ $at.SaveAsFile((Join-Path "{d}" "$($at.FileName)")) }}
+                }}
+            }}
         }} catch {{ }} finally {{ if ($ol) {{ [System.Runtime.Interopservices.Marshal]::ReleaseComObject($ol) | Out-Null }} }}
         """
         try:
@@ -120,41 +132,49 @@ class OutlookMHTMaster(QWidget):
                             break
                 os.remove(p_m)
             except: pass
-        self.build_index()
+        
+        # 🔥 全量索引 - 查找 2026日历.xlsx 并执行后端脱水与染色
+        cal_html = "<p style='color:red;'>未在目录发现 [2026日历.xlsx]</p>"
+        for f in os.listdir(d):
+            if "2026日历" in f and f.endswith(('.xlsx', '.xls')):
+                try:
+                    df = pd.read_excel(os.path.join(d, f))
+                    def color_weekend(v):
+                        try:
+                            dt = pd.to_datetime(v)
+                            if dt.weekday() >= 5: return 'color:red; font-weight:bold; background-color:#fff0f0;'
+                        except: pass
+                        return ''
+                    # 渲染带样式的 HTML 表格
+                    cal_html = df.style.applymap(color_weekend).to_html(classes='cal-table', index=False, na_rep='')
+                    self.add_log(f"📅 华为2026日历解析成功: {f}")
+                    break
+                except: pass
+        self.build_index(cal_html)
 
-    def build_index(self):
+    def build_index(self, cal_html):
         d = self.ui_path.text().strip()
         all_files = [f for f in os.listdir(d) if f.endswith('.html') and f != 'index.html']
         all_files.sort(key=lambda x: os.path.getmtime(os.path.join(d, x)), reverse=True)
-        
         c, t1, t2, cp = self.ui_color.text().strip(), self.ui_title.text().strip(), self.ui_subtitle.text().strip(), self.ui_copy.text().strip()
-        reg_pattern = self.ui_regex.text().strip() or r'\bEP[A-Z0-9]{9}\b'
-
-        items_html, mails_data_html = "", ""
-        search_db = {} 
-
-        for i, f in enumerate(all_files[:150]):
+        
+        items_html, mails_data_html, search_db = "", "", {}
+        for i, f in enumerate(all_files):
             p = os.path.join(d, f)
             with open(p, 'r', encoding='utf-8', errors='ignore') as fc: raw_h = fc.read()
-            text_only = re.sub(r'<(style|script)[^>]*>.*?<\/\1>', '', raw_h, flags=re.DOTALL|re.IGNORECASE)
-            text_only = re.sub(r'<[^>]+>', ' ', text_only)
-            pure_text = " ".join(text_only.split()).lower()
+            # 🔥 全量索引脱水处理 (后端预处理)
+            pure_text = " ".join(re.sub(r'<[^>]+>', ' ', raw_h).split()).lower()
             search_db[f"m_{i}"] = pure_text
-
-            tags_raw = re.findall(reg_pattern, pure_text, re.I)
-            tags_upper = list(set([x.upper() for x in tags_raw]))
-            tag_ui = "".join([f'<span class="et" onclick="fastGo(\'{x}\')">{x}</span>' for x in tags_upper[:5]])
-
-            items_html += f'''<div class="item" id="li_m_{i}" onclick="jump('m_{i}', this)">
-                <div class="ti">{f[:-5]}</div><div class="tags">{tag_ui}</div>
-                <div class="tm">{time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))}</div></div>'''
             
-            mails_data_html += f'''<div id="m_{i}" class="m-box">
-                <div class="m-bar" style="border-left:5px solid {c}">{f[:-5]}</div>
-                <div class="m-body">{raw_h}</div></div>'''
+            # 提取 EP 号并强制大写显示
+            tags = list(set([x.upper() for x in re.findall(self.ui_regex.text().strip(), pure_text, re.I)]))
+            tag_ui = "".join([f'<span class="et" onclick="fastGo(\'{x}\')">{x}</span>' for x in tags[:5]])
+            
+            items_html += f'''<div class="item" id="li_m_{i}" onclick="jump('m_{i}', this)"><div class="ti">{f[:-5]}</div><div class="tags">{tag_ui}</div></div>'''
+            mails_data_html += f'''<div id="m_{i}" class="m-box"><div class="m-bar" style="border-left:5px solid {c}">{f[:-5]}</div><div class="m-body">{raw_h}</div></div>'''
 
         db_b64 = base64.b64encode(json.dumps(search_db).encode('utf-8')).decode('ascii')
-
+        
         index_tpl = f'''
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{t1}</title>
         <style>
@@ -163,44 +183,36 @@ class OutlookMHTMaster(QWidget):
             #main {{ flex:1; overflow-y:auto; padding:20px; scroll-behavior:smooth; }}
             .head {{ padding:15px; background:{c}; color:#fff; }}
             #q {{ width:100%; padding:10px; border:none; border-radius:4px; margin-top:8px; outline:none; }}
-            .item {{ padding:12px; border-bottom:1px solid #eee; cursor:pointer; }}
-            .ti {{ font-size:13px; font-weight:bold; color:#222; }}
+            .item {{ padding:12px; border-bottom:1px solid #eee; cursor:pointer; font-size:13px; }}
             .et {{ background:#e8f5e9; color:{c}; padding:1px 4px; border-radius:3px; font-size:10px; border:1px solid {c}; margin:2px 4px 0 0; display:inline-block; }}
-            .tm {{ font-size:11px; color:#999; margin-top:4px; }}
             .m-box {{ background:#fff; margin-bottom:30px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.1); }}
-            .m-bar {{ padding:12px; background:#fafafa; font-weight:bold; }}
+            .m-bar {{ padding:10px; background:#fafafa; font-weight:bold; }}
             .m-body {{ padding:15px; font-size:14px; overflow-x:auto; }}
             mark {{ background: yellow; color: black; font-weight:bold; }}
             .active {{ background:#e8f5e9 !important; border-right:5px solid {c}; }}
             /* 日历样式 */
-            .cal-btn {{ margin: 10px; padding: 10px; background: #333; color: #fff; text-align: center; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; border: none; }}
-            .cal-btn:hover {{ background: #000; }}
-            #calModal {{ display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); align-items: center; justify-content: center; flex-direction: column; }}
-            .cal-content {{ position: relative; max-width: 85%; background: #fff; padding: 20px; border-radius: 8px; text-align: center; }}
-            #calModal img {{ max-width: 100%; max-height: 65vh; border: 1px solid #ddd; }}
-            .cal-info {{ margin-top: 15px; text-align: left; font-size: 13px; color: #444; column-count: 2; border-top: 1px solid #eee; padding-top: 10px; }}
-            .close-cal {{ position: absolute; top: -35px; right: -5px; color: #fff; font-size: 35px; cursor: pointer; }}
+            .cal-btn {{ margin:10px; padding:12px; background:#333; color:#fff; text-align:center; border-radius:4px; cursor:pointer; font-weight:bold; }}
+            #calModal {{ display:none; position:fixed; z-index:999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.8); align-items:center; justify-content:center; }}
+            .cal-card {{ background:#fff; width:90%; max-height:85%; padding:25px; border-radius:8px; overflow-y:auto; position:relative; }}
+            .cal-table {{ border-collapse:collapse; width:100%; font-size:12px; }}
+            .cal-table th {{ background:#f5f5f5; border:1px solid #ddd; padding:8px; position:sticky; top:0; }}
+            .cal-table td {{ border:1px solid #ddd; padding:8px; text-align:center; }}
+            .close-btn {{ position:absolute; top:10px; right:15px; font-size:24px; cursor:pointer; }}
         </style></head>
         <body>
             <div id="side">
                 <div class="head"><strong>{t1}</strong><br><small>{t2}</small>
-                <input type="text" id="q" placeholder="输入 EP号 自动定位并高亮..." oninput="doSearch(this.value)"></div>
+                <input type="text" id="q" placeholder="输入 EP号 自动定位高亮..." oninput="doSearch(this.value)"></div>
                 <div style="flex:1; overflow-y:auto;">{items_html}</div>
-                <button class="cal-btn" onclick="toggleCal(true)">📅 2026 华为工作日历</button>
+                <div class="cal-btn" onclick="toggleCal(true)">📅 2026 华为工作日历 (Excel解析)</div>
                 <div style="padding:10px; font-size:10px; color:#999; text-align:center;">{cp}</div>
             </div>
             <div id="main">{mails_data_html}</div>
             <div id="calModal" onclick="if(event.target==this) toggleCal(false)">
-                <div class="cal-content">
-                    <span class="close-cal" onclick="toggleCal(false)">&times;</span>
-                    <h3>2026 华为工作日历预告</h3>
-                    <img src="2026cal.jpg" onerror="this.src='https://raw.githubusercontent.com'; this.alt='本地图未找到，加载备用图';" />
-                    <div class="cal-info">
-                        <strong>春节：</strong>2/15-2/23放假(9天)，2/14及2/28上班<br>
-                        <strong>劳动节：</strong>5/1-5/5放假，5/9上班<br>
-                        <strong>国庆：</strong>10/1-10/7放假，9/20及10/10上班<br>
-                        <strong>元旦/清明/端午/中秋：</strong>按标准法定安排
-                    </div>
+                <div class="cal-card">
+                    <span class="close-btn" onclick="toggleCal(false)">&times;</span>
+                    <h2 style="margin-top:0;">📅 华为 2026 工作日历 (Excel 数据源)</h2>
+                    <div style="overflow-x:auto;">{cal_html}</div>
                 </div>
             </div>
             <script>
@@ -208,34 +220,30 @@ class OutlookMHTMaster(QWidget):
                 function toggleCal(s) {{ document.getElementById('calModal').style.display = s ? 'flex' : 'none'; }}
                 function fastGo(v) {{ document.getElementById('q').value = v; doSearch(v); }}
                 function doSearch(kw) {{
-                    const v = kw.toLowerCase().trim();
-                    let first = null;
+                    const v = kw.toLowerCase().trim(); let first = null;
                     Object.keys(db).forEach(id => {{
-                        const match = db[id].includes(v);
-                        document.getElementById('li_'+id).style.display = match ? 'block' : 'none';
+                        const match = db[id].includes(v); document.getElementById('li_'+id).style.display = match ? 'block' : 'none';
                         if(match && !first) first = id;
                     }});
+                    // 超过5字符且匹配则自动跳转定位
                     if(first && v.length > 5) jump(first, document.getElementById('li_'+first));
                 }}
                 function jump(id, el) {{
-                    const target = document.getElementById(id);
-                    const kw = document.getElementById('q').value.trim();
+                    const target = document.getElementById(id); const kw = document.getElementById('q').value.trim();
                     target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                    // 清除旧高亮并应用新高亮
                     document.querySelectorAll('.m-body').forEach(b => b.innerHTML = b.innerHTML.replace(/<mark>|<\/mark>/g, ""));
                     if(kw.length > 2) {{
                         const body = target.querySelector('.m-body');
                         const reg = new RegExp("("+kw+")", "gi");
                         body.innerHTML = body.innerHTML.replace(reg, "<mark>$1</mark>");
                     }}
-                    document.querySelectorAll('.item').forEach(i => i.classList.remove('active'));
-                    el.classList.add('active');
+                    document.querySelectorAll('.item').forEach(i => i.classList.remove('active')); el.classList.add('active');
                 }}
             </script>
         </body></html>'''
         with open(os.path.join(d, 'index.html'), 'w', encoding='utf-8') as f: f.write(index_tpl)
-        self.add_log(f"🌍 看板已更新 (集成2026日历)")
+        self.add_log(f"🌍 看板已同步 (包含全量脱水索引)")
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    win = OutlookMHTMaster(); win.show()
-    sys.exit(app.exec_())
+    app = QApplication(sys.argv); win = OutlookMHTMaster(); win.show(); sys.exit(app.exec_())
