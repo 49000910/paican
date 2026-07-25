@@ -1,0 +1,748 @@
+// ==UserScript==
+// @name         SN编码规则兜底前台版
+// @namespace    mes.sn.rule.fallback.ui
+// @version      1.7
+// @description  SN接口查不到编码时按前台规则兜底；支持双接口强字段（最优先）
+// @match        https://w3.huawei.com/mespmm/wipweb*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  if (window.__SN_RULE_FALLBACK_UI__) return;
+  window.__SN_RULE_FALLBACK_UI__ = true;
+
+  const RULE_KEY = 'sn_code_rule_fallback_rules_v2';
+  const ENABLE_KEY = 'sn_code_rule_fallback_enabled_v2';
+  const STRONG_FIELD_KEY = 'sn_code_rule_fallback_strong_fields_v1';
+  const EXCLUDE_CODE_KEY = 'sn_code_rule_fallback_exclude_codes_v1';
+  const LEFT_CLEAN_KEY = 'sn_code_left_clean_rules_v1';
+
+  const EMS_BASE = 'https://w3.huawei.com/mespmm/gateway/com.huawei.supply.mes.mesplus.pspw:mespmmpreallservice/mespmmpreallone/services/emsComponentDataInfo/find/page';
+  const EMS_PAGE_SIZE = 100;
+  const EMS_MODES = [[0, 0], [7, 0]];
+
+  let enabled = localStorage.getItem(ENABLE_KEY) !== '0';
+
+  function toStr(v) { return v == null ? '' : String(v).trim(); }
+
+  function normSn(v) {
+    v = toStr(v).replace(/\u00A0/g, ' ').replace(/\s+/g, '');
+    if (v.indexOf('：') >= 0) v = v.split('：').pop();
+    if (v.indexOf(':') >= 0) v = v.split(':').pop();
+    return v.toUpperCase();
+  }
+
+  function normCode(v) { return toStr(v).replace(/\u00A0/g, ' ').replace(/\s+/g, '').toUpperCase(); }
+
+  function normSearchText(v) {
+    return toStr(v).replace(/\u00A0/g, ' ').replace(/\s+/g, '').replace(/：/g, ':').toUpperCase();
+  }
+
+  function codeExact(v) { return normCode(v); }
+
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
+  }
+
+  function escReg(s) {
+    const specials = '\\^$.*+?()[]{}|';
+    return String(s).split('').map(function(ch) { return specials.indexOf(ch) >= 0 ? '\\' + ch : ch; }).join('');
+  }
+
+  function wildcardToRegExp(pattern) {
+    pattern = normSn(pattern).replace(/＊/g, '*').replace(/？/g, '?');
+    let out = '^';
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i];
+      if (ch === '?') { out += '[A-Z0-9]'; continue; }
+      if (ch === '*') {
+        let j = i;
+        while (j < pattern.length && pattern[j] === '*') j++;
+        const count = j - i;
+        const isAtEnd = j === pattern.length;
+        if (count === 1 && isAtEnd) out += '[A-Z0-9]*';
+        else out += '[A-Z0-9]{' + count + '}';
+        i = j - 1;
+        continue;
+      }
+      out += escReg(ch);
+    }
+    out += '$';
+    return new RegExp(out, 'i');
+  }
+
+  function normalizeRuleType(type) {
+    type = toStr(type);
+    if (type === '开头' || type === '前缀') return '开头是';
+    if (type === '包括' || type === '含有') return '包含';
+    if (type === '精确' || type === '相等') return '等于';
+    if (type === '通配符') return '通配';
+    if (['包含', '开头是', '等于', '通配'].indexOf(type) >= 0) return type;
+    return '包含';
+  }
+
+  function getEffectiveType(type, pattern) {
+    type = normalizeRuleType(type);
+    pattern = normSn(pattern);
+    if (pattern.indexOf('*') >= 0 || pattern.indexOf('?') >= 0) return '通配';
+    return type;
+  }
+
+  function loadRules() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(RULE_KEY) || '[]');
+      if (Array.isArray(arr)) {
+        return arr.filter(function(r) { return r && r.code && r.pattern; }).map(function(r) {
+          return { code: normCode(r.code), type: normalizeRuleType(r.type || '包含'), pattern: normSn(r.pattern), note: toStr(r.note || '') };
+        });
+      }
+    } catch(e) {}
+    return [];
+  }
+
+  function saveRules(rules) {
+    rules = rules || [];
+    const clean = rules.filter(function(r) { return r && r.code && r.pattern; }).map(function(r) {
+      return { code: normCode(r.code), type: normalizeRuleType(r.type), pattern: normSn(r.pattern), note: toStr(r.note || '') };
+    });
+    localStorage.setItem(RULE_KEY, JSON.stringify(clean));
+    updateMiniButton();
+  }
+
+  function loadStrongFields() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(STRONG_FIELD_KEY) || '[]');
+      if (Array.isArray(arr)) {
+        return arr.filter(function(r) { return r && r.field && r.code; }).map(function(r) {
+          return { field: normSearchText(r.field), code: normCode(r.code), note: toStr(r.note || '') };
+        });
+      }
+    } catch(e) {}
+    return [];
+  }
+
+  function saveStrongFields(rules) {
+    rules = rules || [];
+    const clean = rules.filter(function(r) { return r && r.field && r.code; }).map(function(r) {
+      return { field: normSearchText(r.field), code: normCode(r.code), note: toStr(r.note || '') };
+    });
+    localStorage.setItem(STRONG_FIELD_KEY, JSON.stringify(clean));
+    updateMiniButton();
+  }
+
+  function loadExcludeCodes() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(EXCLUDE_CODE_KEY) || '[]');
+      if (Array.isArray(arr)) return arr.map(function(x) { return codeExact(x); }).filter(Boolean);
+    } catch(e) {}
+    return [];
+  }
+
+  function saveExcludeCodes(codes) {
+    codes = codes || [];
+    const clean = codes.map(function(x) { return codeExact(x); }).filter(Boolean);
+    const unique = [];
+    clean.forEach(function(x) { if (unique.indexOf(x) < 0) unique.push(x); });
+    localStorage.setItem(EXCLUDE_CODE_KEY, JSON.stringify(unique));
+    updateMiniButton();
+  }
+
+  function loadLeftCleanRules() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(LEFT_CLEAN_KEY) || '[]');
+      if (Array.isArray(arr)) {
+        const out = [];
+        arr.forEach(function(x) {
+          x = toStr(x).replace(/\u00A0/g, ' ').replace(/\s+/g, '').replace(/：/g, ':').replace(/－/g, '-');
+          if (x && out.indexOf(x) < 0) out.push(x);
+        });
+        return out;
+      }
+    } catch(e) {}
+    return [];
+  }
+
+  function saveLeftCleanRules(rules) {
+    rules = rules || [];
+    const clean = [];
+    rules.forEach(function(x) {
+      x = toStr(x).replace(/\u00A0/g, ' ').replace(/\s+/g, '').replace(/：/g, ':').replace(/－/g, '-');
+      if (x && clean.indexOf(x) < 0) clean.push(x);
+    });
+    localStorage.setItem(LEFT_CLEAN_KEY, JSON.stringify(clean));
+    updateMiniButton();
+  }
+
+  function isExcludedCodeForEms(code) {
+    code = codeExact(code);
+    if (!code) return false;
+    const excludes = loadExcludeCodes();
+    return excludes.indexOf(code) >= 0;
+  }
+
+  // ===== ★★★ 强字段匹配（双接口通用，最优先）★★★ =====
+  function matchStrongFieldInText(text, rulesOverride) {
+    text = normSearchText(text);
+    if (!text) return null;
+    const rules = rulesOverride || loadStrongFields();
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      const field = normSearchText(r.field);
+      const code = normCode(r.code);
+      if (!field || !code) continue;
+      if (text.indexOf(field) >= 0) {
+        return { index: i + 1, field: field, code: code, note: r.note || '' };
+      }
+    }
+    return null;
+  }
+
+  async function fetchEmsPageForStrongTest(sn, pageSize, pageNo, a, b) {
+    const url = EMS_BASE + '/' + pageSize + '/' + pageNo + '/' + a + '/' + b;
+    const body = { barCode: '', snStr: sn, itemName: '', componentType: '', createdFrom: '', createdTo: '' };
+    const r = await fetch(url, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return JSON.parse(await r.text());
+  }
+
+  async function queryEmsStrongFieldBySn(snRaw) {
+    const sn = normSn(snRaw);
+    if (!sn) return { sn: '', hit: null, rows: 0, pages: 0, mode: '-' };
+    let rules = [];
+    try { rules = readStrongFieldsFromTable().filter(function(r) { return r.field && r.code; }); } catch(e) { rules = loadStrongFields(); }
+    let totalRows = 0;
+    let totalPagesChecked = 0;
+    for (let m = 0; m < EMS_MODES.length; m++) {
+      const a = EMS_MODES[m][0];
+      const b = EMS_MODES[m][1];
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const j = await fetchEmsPageForStrongTest(sn, EMS_PAGE_SIZE, page, a, b);
+        totalPagesChecked++;
+        const vo = j && j.resultObjVO || {};
+        const pageVO = vo.pageVO || {};
+        const rows = vo.result || [];
+        if (Array.isArray(rows)) totalRows += rows.length;
+        const text = JSON.stringify(j);
+        const hit = matchStrongFieldInText(text, rules);
+        if (hit) return { sn: sn, hit: hit, rows: totalRows, pages: totalPagesChecked, mode: a + '/' + b };
+        totalPages = Number(pageVO.totalPages || 1);
+        page++;
+      } while (page <= totalPages);
+    }
+    return { sn: sn, hit: null, rows: totalRows, pages: totalPagesChecked, mode: '-' };
+  }
+
+  function matchRule(snRaw) {
+    const sn = normSn(snRaw);
+    if (!sn) return null;
+    const rules = loadRules();
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      const value = normSn(r.pattern);
+      const type = getEffectiveType(r.type, value);
+      if (!r.code || !value) continue;
+      let ok = false;
+      if (type === '开头是') ok = sn.startsWith(value);
+      else if (type === '包含') ok = sn.indexOf(value) >= 0;
+      else if (type === '等于') ok = sn === value;
+      else if (type === '通配') ok = wildcardToRegExp(value).test(sn);
+      else ok = sn.indexOf(value) >= 0;
+      if (ok) return { sn: sn, code: r.code, type: type, pattern: r.pattern, note: r.note || '', index: i + 1 };
+    }
+    return null;
+  }
+
+  function getFetchUrl(input) {
+    if (typeof input === 'string') return input;
+    if (input && input.url) return input.url;
+    return '';
+  }
+
+  function getFetchBody(input, init) {
+    if (init && init.body) return init.body;
+    return '';
+  }
+
+  function isEmsFindUrl(url) { return /emsComponentDataInfo\/find\/page/i.test(String(url || '')); }
+  function isOpenApiUrl(url) { return /openapi\/getSnAttr/i.test(String(url || '')); }
+
+  function jsonResponseLike(res, j) {
+    const headers = new Headers(res.headers);
+    headers.set('content-type', 'application/json;charset=utf-8');
+    return new Response(JSON.stringify(j), {
+      status: res.status,
+      statusText: res.statusText,
+      headers: headers
+    });
+  }
+
+  function injectStrongCodeToResult(j, hit) {
+    if (!j || !hit || !hit.code) return j;
+    if (!j.resultObjVO || typeof j.resultObjVO !== 'object') j.resultObjVO = {};
+    if (!Array.isArray(j.resultObjVO.result)) j.resultObjVO.result = [];
+    j.resultObjVO.result.unshift({
+      __snRuleStrongField: true,
+      __snRuleField: hit.field,
+      __snRuleNote: hit.note || '',
+      partNo: hit.code,
+      itemCode: hit.code,
+      materialCode: hit.code,
+      code: hit.code
+    });
+    return j;
+  }
+
+  const rawFetch = window.fetch;
+
+  window.fetch = async function(input, init) {
+    const res = await rawFetch.apply(this, arguments);
+    try {
+      enabled = localStorage.getItem(ENABLE_KEY) !== '0';
+      if (!enabled) return res;
+
+      const url = getFetchUrl(input);
+      const clone = res.clone();
+      let text = '';
+      try { text = await clone.text(); } catch(e) { return res; }
+
+      // ★★★ 强字段优先检查（双接口通用）★★★
+      const strongHit = matchStrongFieldInText(text);
+      if (strongHit && strongHit.code) {
+        console.log('[SN规则兜底] 强字段命中（最优先）:', strongHit.field, '=>', strongHit.code);
+
+        if (isEmsFindUrl(url)) {
+          let j = null;
+          try { j = JSON.parse(text); } catch(e) { return res; }
+          j = injectStrongCodeToResult(j, strongHit);
+          return jsonResponseLike(res, j);
+        }
+
+        if (isOpenApiUrl(url)) {
+          let j = null;
+          try { j = JSON.parse(text); } catch(e) { return res; }
+          if (!j || typeof j !== 'object') return res;
+          if (!j.resultObjVO || typeof j.resultObjVO !== 'object') j.resultObjVO = {};
+          j.resultObjVO = Object.assign({}, j.resultObjVO, {
+            partNo: strongHit.code,
+            __snRuleStrongField: true,
+            __snRuleField: strongHit.field
+          });
+          return jsonResponseLike(res, j);
+        }
+      }
+
+      if (isEmsFindUrl(url)) {
+        let j = null;
+        try { j = JSON.parse(text); } catch(e) { return res; }
+        let changed = false;
+        (function sanitize(obj) {
+          if (obj == null) return;
+          if (Array.isArray(obj)) {
+            for (let i = 0; i < obj.length; i++) {
+              if (typeof obj[i] === 'string' && isExcludedCodeForEms(obj[i])) { obj[i] = ''; changed = true; }
+              else if (typeof obj[i] === 'object') { sanitize(obj[i]); }
+            }
+            return;
+          }
+          if (typeof obj === 'object') {
+            Object.keys(obj).forEach(function(k) {
+              if (typeof obj[k] === 'string' && isExcludedCodeForEms(obj[k])) { obj[k] = ''; changed = true; }
+              else if (typeof obj[k] === 'object') { sanitize(obj[k]); }
+            });
+          }
+        })(j);
+        if (changed) { console.log('[SN规则兜底] 接口一已清除排除编码'); return jsonResponseLike(res, j); }
+        return res;
+      }
+
+      if (isOpenApiUrl(url)) {
+        const reqBody = getFetchBody(input, init);
+        let sn = '';
+        if (typeof reqBody === 'string') {
+          try { const bodyJson = JSON.parse(reqBody); sn = bodyJson && bodyJson.sn || ''; } catch(e) {}
+        }
+        if (!sn) return res;
+        let j = null;
+        try { j = JSON.parse(text); } catch(e) { return res; }
+        if (!j || typeof j !== 'object') return res;
+        if (!j.resultObjVO || typeof j.resultObjVO !== 'object') j.resultObjVO = {};
+        const vo = j.resultObjVO;
+        const nowCode = normCode(vo.partNo || '');
+        if (nowCode) return jsonResponseLike(res, j);
+        const hit = matchRule(sn);
+        if (!hit || !hit.code) return jsonResponseLike(res, j);
+        j.resultObjVO = Object.assign({}, vo, {
+          partNo: hit.code,
+          __ruleFallback: true,
+          __ruleType: hit.type,
+          __rulePattern: hit.pattern
+        });
+        console.log('[SN规则兜底] SN规则命中:', sn, '=>', hit.code, '方式:', hit.type, '规则:', hit.pattern);
+        return jsonResponseLike(res, j);
+      }
+
+      return res;
+    } catch(e) {
+      console.warn('[SN规则兜底] 异常:', e);
+      return res;
+    }
+  };
+
+  function updateMiniButton() {
+    const count = document.getElementById('sn-rule-count');
+    if (count) count.textContent = String(loadRules().length);
+    const strongCount = document.getElementById('sn-strong-count');
+    if (strongCount) strongCount.textContent = String(loadStrongFields().length);
+    const excludeCount = document.getElementById('sn-exclude-count');
+    if (excludeCount) excludeCount.textContent = String(loadExcludeCodes().length);
+    const leftCleanCount = document.getElementById('sn-left-clean-count');
+    if (leftCleanCount) leftCleanCount.textContent = String(loadLeftCleanRules().length);
+    const state = document.getElementById('sn-rule-state');
+    if (state) {
+      enabled = localStorage.getItem(ENABLE_KEY) !== '0';
+      state.textContent = enabled ? '开' : '关';
+      state.style.color = enabled ? '#389e0d' : '#d4380d';
+    }
+  }
+
+  function createMiniButton() {
+    if (document.getElementById('sn-rule-mini')) return;
+    const btn = document.createElement('div');
+    btn.id = 'sn-rule-mini';
+    btn.style.cssText = 'position:fixed;right:12px;bottom:58px;z-index:2147483646;background:#fff;color:#222;border:1px solid #bbb;border-radius:6px;padding:6px 9px;font-size:12px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.18);font-family:Arial,"Microsoft YaHei",sans-serif;user-select:none;';
+    btn.innerHTML = 'SN规则:<b id="sn-rule-count">' + loadRules().length + '</b> 强字段:<b id="sn-strong-count">' + loadStrongFields().length + '</b> 排除:<b id="sn-exclude-count">' + loadExcludeCodes().length + '</b> 左清洗:<b id="sn-left-clean-count">' + loadLeftCleanRules().length + '</b> <span style="margin-left:4px;">状态:</span> <b id="sn-rule-state" style="color:' + (enabled ? '#389e0d' : '#d4380d') + ';">' + (enabled ? '开' : '关') + '</b>';
+    btn.addEventListener('click', showRuleModal);
+    document.body.appendChild(btn);
+  }
+
+  function createEmptyRule() { return { code: '', type: '包含', pattern: '', note: '' }; }
+  function createEmptyStrongField() { return { field: '', code: '', note: '' }; }
+
+  function readRulesFromTable() {
+    const rows = Array.from(document.querySelectorAll('#sn-rule-tbody tr'));
+    const rules = [];
+    rows.forEach(function(tr) {
+      const codeEl = tr.querySelector('.sn-rule-code');
+      const typeEl = tr.querySelector('.sn-rule-type');
+      const patternEl = tr.querySelector('.sn-rule-pattern');
+      const noteEl = tr.querySelector('.sn-rule-note');
+      const code = normCode(codeEl ? codeEl.value : '');
+      let type = '包含';
+      if (typeEl) {
+        if (typeEl.selectedIndex >= 0 && typeEl.options[typeEl.selectedIndex]) type = toStr(typeEl.options[typeEl.selectedIndex].value);
+        else type = toStr(typeEl.value || '包含');
+      }
+      type = normalizeRuleType(type);
+      const pattern = normSn(patternEl ? patternEl.value : '');
+      const note = toStr(noteEl ? noteEl.value : '');
+      if (!code && !pattern) return;
+      rules.push({ code: code, type: type, pattern: pattern, note: note });
+    });
+    return rules;
+  }
+
+  function readStrongFieldsFromTable() {
+    const rows = Array.from(document.querySelectorAll('#sn-strong-tbody tr'));
+    const rules = [];
+    rows.forEach(function(tr) {
+      const fieldEl = tr.querySelector('.sn-strong-field');
+      const codeEl = tr.querySelector('.sn-strong-code');
+      const noteEl = tr.querySelector('.sn-strong-note');
+      const field = normSearchText(fieldEl ? fieldEl.value : '');
+      const code = normCode(codeEl ? codeEl.value : '');
+      const note = toStr(noteEl ? noteEl.value : '');
+      if (!field && !code) return;
+      rules.push({ field: field, code: code, note: note });
+    });
+    return rules;
+  }
+
+  function readExcludeCodesFromBox() {
+    const el = document.getElementById('sn-exclude-text');
+    const text = el ? el.value : '';
+    return text.split(/[\s,，;；\n\r]+/).map(function(x) { return codeExact(x); }).filter(Boolean);
+  }
+
+  function readLeftCleanRulesFromBox() {
+    const el = document.getElementById('sn-left-clean-text');
+    const text = el ? el.value : '';
+    return text.split(/[\n\r]+/).map(function(x) { return toStr(x); }).filter(Boolean);
+  }
+
+  function saveFromTable() {
+    const rules = readRulesFromTable().filter(function(r) { return r.code && r.pattern; });
+    const strongRules = readStrongFieldsFromTable().filter(function(r) { return r.field && r.code; });
+    const excludeCodes = readExcludeCodesFromBox();
+    const leftCleanRules = readLeftCleanRulesFromBox();
+    saveRules(rules);
+    saveStrongFields(strongRules);
+    saveExcludeCodes(excludeCodes);
+    saveLeftCleanRules(leftCleanRules);
+    updateMiniButton();
+    setRuleMsg('已保存：SN规则 ' + rules.length + ' 条，强字段 ' + strongRules.length + ' 条，接口一排除编码 ' + excludeCodes.length + ' 个，左侧清洗规则 ' + leftCleanRules.length + ' 条');
+  }
+
+  function setRuleMsg(msg, color) {
+    const el = document.getElementById('sn-rule-msg');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.color = color || '#389e0d';
+  }
+
+  function ruleRowHtml(r, i) {
+    r = r || createEmptyRule();
+    const currType = normalizeRuleType(r.type || '包含');
+    const types = ['包含', '开头是', '等于', '通配'];
+    return '<tr><td style="border:1px solid #eee;padding:4px;text-align:center;width:40px;">' + (i + 1) + '</td>' +
+      '<td style="border:1px solid #eee;padding:4px;width:120px;"><input class="sn-rule-code" value="' + escHtml(r.code || '') + '" placeholder="如 34100239" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;width:90px;"><select class="sn-rule-type" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;">' +
+      types.map(function(t) { return '<option value="' + t + '"' + (currType === t ? ' selected' : '') + '>' + t + '</option>'; }).join('') +
+      '</select></td>' +
+      '<td style="border:1px solid #eee;padding:4px;width:150px;"><input class="sn-rule-pattern" value="' + escHtml(r.pattern || '') + '" placeholder="如 K179 / K???????" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;"><input class="sn-rule-note" value="' + escHtml(r.note || '') + '" placeholder="备注，可不填" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;text-align:center;width:60px;"><button class="sn-rule-del" style="font-size:12px;height:24px;color:#d4380d;">删除</button></td></tr>';
+  }
+
+  function strongRowHtml(r, i) {
+    r = r || createEmptyStrongField();
+    return '<tr><td style="border:1px solid #eee;padding:4px;text-align:center;width:40px;">' + (i + 1) + '</td>' +
+      '<td style="border:1px solid #eee;padding:4px;width:210px;"><input class="sn-strong-field" value="' + escHtml(r.field || '') + '" placeholder="如 OC8072V1H74S" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;width:120px;"><input class="sn-strong-code" value="' + escHtml(r.code || '') + '" placeholder="如 34090213" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;"><input class="sn-strong-note" value="' + escHtml(r.note || '') + '" placeholder="备注，可不填" style="width:100%;height:24px;box-sizing:border-box;font-size:12px;"></td>' +
+      '<td style="border:1px solid #eee;padding:4px;text-align:center;width:60px;"><button class="sn-strong-del" style="font-size:12px;height:24px;color:#d4380d;">删除</button></td></tr>';
+  }
+
+  function bindDeleteButtons() {
+    const ruleBody = document.getElementById('sn-rule-tbody');
+    if (ruleBody) {
+      ruleBody.querySelectorAll('.sn-rule-del').forEach(function(btn) {
+        btn.onclick = function() { const tr = btn.closest('tr'); if (tr) tr.remove(); };
+      });
+    }
+    const strongBody = document.getElementById('sn-strong-tbody');
+    if (strongBody) {
+      strongBody.querySelectorAll('.sn-strong-del').forEach(function(btn) {
+        btn.onclick = function() { const tr = btn.closest('tr'); if (tr) tr.remove(); };
+      });
+    }
+  }
+
+  function renderRuleTable() {
+    const leftCleanBox = document.getElementById('sn-left-clean-text');
+    if (leftCleanBox) leftCleanBox.value = loadLeftCleanRules().join('\n');
+    const tbody = document.getElementById('sn-rule-tbody');
+    if (tbody) {
+      const rules = loadRules();
+      if (rules.length) tbody.innerHTML = rules.map(function(r, i) { return ruleRowHtml(r, i); }).join('');
+      else tbody.innerHTML = ruleRowHtml(createEmptyRule(), 0);
+    }
+    const strongTbody = document.getElementById('sn-strong-tbody');
+    if (strongTbody) {
+      const strongRules = loadStrongFields();
+      if (strongRules.length) strongTbody.innerHTML = strongRules.map(function(r, i) { return strongRowHtml(r, i); }).join('');
+      else strongTbody.innerHTML = strongRowHtml(createEmptyStrongField(), 0);
+    }
+    const excludeBox = document.getElementById('sn-exclude-text');
+    if (excludeBox) excludeBox.value = loadExcludeCodes().join('\n');
+    bindDeleteButtons();
+    updateMiniButton();
+  }
+
+  function addRuleRow(rule) {
+    const tbody = document.getElementById('sn-rule-tbody');
+    if (!tbody) return;
+    const idx = tbody.querySelectorAll('tr').length;
+    const temp = document.createElement('tbody');
+    temp.innerHTML = ruleRowHtml(rule || createEmptyRule(), idx);
+    const tr = temp.querySelector('tr');
+    tbody.appendChild(tr);
+    bindDeleteButtons();
+  }
+
+  function addStrongRow(rule) {
+    const tbody = document.getElementById('sn-strong-tbody');
+    if (!tbody) return;
+    const idx = tbody.querySelectorAll('tr').length;
+    const temp = document.createElement('tbody');
+    temp.innerHTML = strongRowHtml(rule || createEmptyStrongField(), idx);
+    const tr = temp.querySelector('tr');
+    tbody.appendChild(tr);
+    bindDeleteButtons();
+  }
+
+  function testRuleInModal() {
+    const input = document.getElementById('sn-rule-test-sn');
+    const sn = normSn(input ? input.value : '');
+    if (!sn) { setRuleMsg('请输入测试SN', '#d4380d'); return; }
+    const tempRules = readRulesFromTable().filter(function(r) { return r.code && r.pattern; });
+    let hit = null;
+    for (let i = 0; i < tempRules.length; i++) {
+      const r = tempRules[i];
+      const value = normSn(r.pattern);
+      const type = getEffectiveType(r.type, value);
+      let ok = false;
+      if (type === '包含') ok = sn.indexOf(value) >= 0;
+      else if (type === '开头是') ok = sn.startsWith(value);
+      else if (type === '等于') ok = sn === value;
+      else if (type === '通配') ok = wildcardToRegExp(value).test(sn);
+      if (ok) { hit = { code: r.code, type: type, pattern: r.pattern, index: i + 1 }; break; }
+    }
+    if (hit) setRuleMsg('SN规则测试命中：' + sn + ' => ' + hit.code + '，第 ' + hit.index + ' 行，' + hit.type + ' ' + hit.pattern, '#389e0d');
+    else setRuleMsg('SN规则测试未命中：' + sn, '#d4380d');
+  }
+
+  async function testStrongFieldInModal() {
+    const input = document.getElementById('sn-strong-test-text');
+    const sn = normSn(input ? input.value : '');
+    if (!sn) { setRuleMsg('请输入要查询的序列号SN', '#d4380d'); return; }
+    setRuleMsg('查询中（接口一+接口二）...', '#d48806');
+
+    try {
+      let hit = null;
+      let source = '';
+
+      // 接口一
+      for (let m = 0; m < EMS_MODES.length; m++) {
+        const a = EMS_MODES[m][0];
+        const b = EMS_MODES[m][1];
+        let page = 1;
+        let totalPages = 1;
+        do {
+          const j = await fetchEmsPageForStrongTest(sn, EMS_PAGE_SIZE, page, a, b);
+          const text = JSON.stringify(j);
+          const h = matchStrongFieldInText(text);
+          if (h) { hit = h; source = '接口一'; break; }
+          const vo = j && j.resultObjVO || {};
+          const pageVO = vo.pageVO || {};
+          totalPages = Number(pageVO.totalPages || 1);
+          page++;
+        } while (page <= totalPages);
+        if (hit) break;
+      }
+
+      // 接口一没命中，查接口二
+      if (!hit) {
+        try {
+          const apiUrl = 'https://w3.huawei.com/mes/qmgateway/com.huawei.supply.mes.mesplus.qm:mesqmmitrservice/mes/mitrservice/services/openapi/getSnAttr';
+          const r2 = await fetch(apiUrl, {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sn: sn })
+          });
+          const text2 = await r2.text();
+          const h = matchStrongFieldInText(text2);
+          if (h) { hit = h; source = '接口二'; }
+        } catch(e) {}
+      }
+
+      if (hit) {
+        setRuleMsg('✅ 强字段命中（' + source + '）：' + hit.field + ' => ' + hit.code, '#389e0d');
+      } else {
+        setRuleMsg('❌ 两个接口都未命中强字段', '#d4380d');
+      }
+    } catch(e) {
+      setRuleMsg('查询异常：' + e.message, '#d4380d');
+    }
+  }
+
+  function showRuleModal() {
+    let modal = document.getElementById('sn-rule-modal');
+    if (modal) { modal.style.display = 'block'; renderRuleTable(); return; }
+
+    modal = document.createElement('div');
+    modal.id = 'sn-rule-modal';
+    modal.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:920px;max-width:calc(100vw-40px);height:720px;max-height:calc(100vh-40px);background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;z-index:2147483647;box-shadow:0 8px 30px rgba(0,0,0,.28);font-size:12px;font-family:Arial,"Microsoft YaHei",sans-serif;overflow:hidden;';
+
+    modal.innerHTML = '<div style="height:38px;line-height:38px;padding:0 12px;background:#f5f5f5;border-bottom:1px solid #ddd;display:flex;align-items:center;justify-content:space-between;"><b>SN编码规则兜底设置</b><button id="sn-rule-close" style="font-size:12px;">关闭</button></div>' +
+      '<div style="padding:8px 12px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+      '<label><input id="sn-rule-enabled" type="checkbox" ' + (enabled ? 'checked' : '') + '> 启用规则兜底</label>' +
+      '<button id="sn-rule-save" style="font-size:12px;height:24px;color:#389e0d;">保存全部</button>' +
+      '<button id="sn-rule-clear" style="font-size:12px;height:24px;color:#d4380d;">清空全部</button>' +
+      '<span id="sn-rule-msg" style="margin-left:6px;color:#389e0d;"></span></div>' +
+
+      '<div style="height:calc(100% - 94px);overflow:auto;padding:10px 12px;box-sizing:border-box;">' +
+
+      '<div style="margin-bottom:14px;border:1px solid #ddd;border-radius:6px;overflow:hidden;">' +
+      '<div style="background:#fafafa;padding:7px 10px;font-weight:bold;">一、SN规则兜底：接口一/接口二都查不到时，用SN规则判断编码<button id="sn-rule-add" style="float:right;font-size:12px;height:22px;">新增一行</button></div>' +
+      '<div style="padding:8px;">' +
+      '<div style="margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span>测试SN：</span><input id="sn-rule-test-sn" placeholder="如 K0154738" style="width:180px;height:24px;box-sizing:border-box;font-size:12px;"><button id="sn-rule-test-btn" style="font-size:12px;height:24px;">测试SN规则</button><span style="color:#666;">例：K??????? 表示K开头总共8位；K179* 表示K179开头后面任意长度</span></div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="background:#fafafa;"><th style="border:1px solid #eee;padding:5px;width:40px;">序号</th><th style="border:1px solid #eee;padding:5px;width:120px;">编码</th><th style="border:1px solid #eee;padding:5px;width:90px;">匹配方式</th><th style="border:1px solid #eee;padding:5px;width:150px;">SN规则</th><th style="border:1px solid #eee;padding:5px;">备注</th><th style="border:1px solid #eee;padding:5px;width:60px;">操作</th></tr></thead><tbody id="sn-rule-tbody"></tbody></table>' +
+      '<div style="margin-top:6px;color:#777;line-height:18px;">包含：SN里包含规则内容；开头是：SN以前缀开头；等于：SN完全一样；通配：? 表示任意1位，末尾单个 * 表示后面任意长度。SN规则里有 * 或 ? 时，会自动按通配处理。</div></div></div>' +
+
+      '<div style="margin-bottom:14px;border:1px solid #ddd;border-radius:6px;overflow:hidden;">' +
+      '<div style="background:#fafafa;padding:7px 10px;font-weight:bold;">二、双接口强字段（最优先）：接口一/接口二返回内容包含固定字符，强制等于指定编码<button id="sn-strong-add" style="float:right;font-size:12px;height:22px;">新增一行</button></div>' +
+      '<div style="padding:8px;">' +
+      '<div style="margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span>测试序列号SN：</span><input id="sn-strong-test-text" placeholder="输入SN测试两个接口" style="width:220px;height:24px;box-sizing:border-box;font-size:12px;"><button id="sn-strong-test-btn" style="font-size:12px;height:24px;">查询两个接口并测试</button><span style="color:#666;">同时测试接口一和接口二，显示命中来源</span></div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="background:#fafafa;"><th style="border:1px solid #eee;padding:5px;width:40px;">序号</th><th style="border:1px solid #eee;padding:5px;width:210px;">固定字符</th><th style="border:1px solid #eee;padding:5px;width:120px;">等于编码</th><th style="border:1px solid #eee;padding:5px;">备注</th><th style="border:1px solid #eee;padding:5px;width:60px;">操作</th></tr></thead><tbody id="sn-strong-tbody"></tbody></table>' +
+      '<div style="margin-top:6px;color:#777;line-height:18px;">说明：接口一和接口二返回数据里只要出现"固定字符"，就把"等于编码"插入结果最前面，优先给校验脚本命中。强字段不受排除编码影响。</div></div></div>' +
+
+      '<div style="margin-bottom:14px;border:1px solid #ddd;border-radius:6px;overflow:hidden;">' +
+      '<div style="background:#fafafa;padding:7px 10px;font-weight:bold;">三、接口一排除编码：这些编码在接口一里不要命中</div>' +
+      '<div style="padding:8px;"><textarea id="sn-exclude-text" placeholder="一行一个编码" style="width:100%;height:80px;box-sizing:border-box;font-size:12px;line-height:18px;resize:vertical;"></textarea>' +
+      '<div style="margin-top:6px;color:#777;line-height:18px;">说明：排除编码只作用于接口一，且必须完全相等。接口二和SN规则兜底不受这里影响。</div></div></div>' +
+
+      '<div style="margin-bottom:14px;border:1px solid #ddd;border-radius:6px;overflow:hidden;">' +
+      '<div style="background:#fafafa;padding:7px 10px;font-weight:bold;">四、左侧条码清洗</div>' +
+      '<div style="padding:8px;"><textarea id="sn-left-clean-text" placeholder="一行一个清洗规则" style="width:100%;height:90px;box-sizing:border-box;font-size:12px;line-height:18px;resize:vertical;"></textarea>' +
+      '<div style="margin-top:6px;color:#777;line-height:18px;">说明：1、填写 SN：左侧 SN03035FDT 会清洗成 03035FDT。2、填写 : ：左侧 U1:213409015510S4104636 会清洗成 213409015510S4104636。3、填写 - ：左侧 ABC-34090213 会清洗成 34090213。</div></div></div>' +
+
+      '</div>';
+
+    document.body.appendChild(modal);
+
+    document.getElementById('sn-rule-close').onclick = function() { modal.style.display = 'none'; };
+    document.getElementById('sn-rule-enabled').onchange = function() {
+      enabled = this.checked;
+      localStorage.setItem(ENABLE_KEY, enabled ? '1' : '0');
+      updateMiniButton();
+      setRuleMsg(enabled ? '规则兜底已启用' : '规则兜底已关闭', enabled ? '#389e0d' : '#d4380d');
+    };
+    document.getElementById('sn-rule-save').onclick = saveFromTable;
+    document.getElementById('sn-rule-clear').onclick = function() {
+      if (!confirm('确定清空所有规则？')) return;
+      saveRules([]); saveStrongFields([]); saveExcludeCodes([]); saveLeftCleanRules([]);
+      renderRuleTable();
+      setRuleMsg('已清空全部规则', '#d4380d');
+    };
+    document.getElementById('sn-rule-add').onclick = function() { addRuleRow(); };
+    document.getElementById('sn-strong-add').onclick = function() { addStrongRow(); };
+    document.getElementById('sn-rule-test-btn').onclick = testRuleInModal;
+    document.getElementById('sn-strong-test-btn').onclick = testStrongFieldInModal;
+
+    renderRuleTable();
+  }
+
+  function bootUI() {
+    if (!document.body) { setTimeout(bootUI, 300); return; }
+    createMiniButton();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootUI);
+  } else {
+    bootUI();
+  }
+
+  window.SN_RULE_UI = {
+    show: showRuleModal,
+    rules: loadRules,
+    strongFields: loadStrongFields,
+    excludes: loadExcludeCodes,
+    test: matchRule,
+    testStrong: matchStrongFieldInText,
+    queryStrongBySn: queryEmsStrongFieldBySn,
+    enable: function() { enabled = true; localStorage.setItem(ENABLE_KEY, '1'); updateMiniButton(); },
+    disable: function() { enabled = false; localStorage.setItem(ENABLE_KEY, '0'); updateMiniButton(); },
+    clear: function() { saveRules([]); saveStrongFields([]); saveExcludeCodes([]); saveLeftCleanRules([]); updateMiniButton(); }
+  };
+
+  console.log('[SN规则兜底前台版] 已安装 v1.7 - 双接口强字段（最优先）');
+})();
