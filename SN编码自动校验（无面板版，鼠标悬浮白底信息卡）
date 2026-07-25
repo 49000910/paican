@@ -1,0 +1,2063 @@
+
+
+// ==UserScript==
+// @name         SN编码自动校验（无面板版，鼠标悬浮白底信息卡）
+// @namespace    tm.sn.code.check.no.panel.hover.white
+// @version      2.7.1
+// @match        https://w3.huawei.com/mespmm/wipweb*
+// @grant        none
+// ==/UserScript==
+
+(async function () {
+  'use strict';
+
+  // ===== MES授权门禁 START =====
+  async function __MES_AUTH_GATE__() {
+    if (
+      location.hostname === 'mes.huawei.com' &&
+      location.href.indexOf('/mespmm/rptwebnew') >= 0 &&
+      location.hash.indexOf('autoExtract=1') >= 0
+    ) {
+      return true;
+    }
+
+    var KEY = 'MES_AUTH_CENTER_STATE_V1';
+    var start = Date.now();
+
+    while (Date.now() - start < 10000) {
+      try {
+        var st = JSON.parse(localStorage.getItem(KEY) || 'null');
+
+        if (st && st.ok && Date.now() - Number(st.ts || 0) < 10000) {
+          console.log('[MES授权门禁] 已授权，脚本继续运行：', st.jobNumber);
+          return true;
+        }
+      } catch (e) {}
+
+      await new Promise(function (r) {
+        setTimeout(r, 300);
+      });
+    }
+
+    console.warn('[MES授权门禁] 未授权，脚本已停止运行');
+    return false;
+  }
+
+  if (!(await __MES_AUTH_GATE__())) return;
+  // ===== MES授权门禁 END =====
+
+  if (!location.href.includes('#/ProductTrackInOut')) return;
+
+
+  const BASE = 'https://w3.huawei.com/mespmm/gateway/com.huawei.supply.mes.mesplus.pspw:mespmmpreallservice/mespmmpreallone/services/emsComponentDataInfo/find/page';
+  const selector = 'input[id^="sn-input"]';
+
+  // 由别的脚本面板控制
+  const LOCK_SWITCH_KEY = 'sn_code_check_lock_on';
+  const AUTO_ROUTE_KEY = 'sn_code_auto_route_on';
+// 左侧条码清洗规则，由兜底脚本设置
+const LEFT_CLEAN_KEY = 'sn_code_left_clean_rules_v1';
+// ===== 父项条码-BOM-SN采集记录 =====
+const BOM_COLLECT_STORE_KEY = 'sn_bom_collect_store_v1';
+const BOM_COLLECT_MAX_PARENT = 500;
+const bomCollectUnlockMap = new WeakMap();
+
+  let lockOn = localStorage.getItem(LOCK_SWITCH_KEY) === '1';
+  let autoRouteOn = localStorage.getItem(AUTO_ROUTE_KEY) !== '0';
+
+  let __checkTimer = null;
+  const __reqSeq = new WeakMap();
+  const rowBubbleMap = new WeakMap();
+  const rowBubbleKeys = new Set();
+  const lastScanByInput = new WeakMap();
+  const lastNonEmptyScanByInput = new WeakMap();
+  // ===== SN重复锁定：统一放在脚本1，避免和自动转填冲突 =====
+  let dupLockedEl = null;
+  let dupSuppressUntil = 0;
+
+  // 左侧红色括号DOM
+  const dupBracketEls = [];
+
+  // 被淡红标记过的重复框
+  const dupPaintEls = new Set();
+
+  function suppressDuplicateLockForRoute(ms) {
+    dupSuppressUntil = Date.now() + (ms || 1200);
+  }
+
+  function isDuplicateLockSuppressed() {
+    return Date.now() < dupSuppressUntil;
+  }
+
+  function isVisibleSnInputForDup(el) {
+    if (!el || !document.body.contains(el)) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function isSnRouteMoving(el) {
+    return !!(
+      el &&
+      el.dataset &&
+      (
+        el.dataset.snAutoFill === '1' ||
+        el.dataset.snRouteMoving === '1'
+      )
+    );
+  }
+
+  function clearDupBrackets() {
+    while (dupBracketEls.length) {
+      var el = dupBracketEls.pop();
+      if (el && el.parentNode) {
+        el.parentNode.removeChild(el);
+      }
+    }
+  }
+
+  function clearDupPaint(el) {
+    if (!el || !el.dataset || el.dataset.snDupPaint !== '1') return;
+
+    el.style.outline = '';
+    el.style.backgroundColor = '';
+    el.style.boxShadow = '';
+    el.style.color = '';
+
+    if (el.title && el.title.indexOf('重复条码') >= 0) {
+      el.title = '';
+    }
+
+    delete el.dataset.snDupPaint;
+  }
+
+  function clearAllDupPaint() {
+    dupPaintEls.forEach(function (el) {
+      clearDupPaint(el);
+    });
+    dupPaintEls.clear();
+  }
+
+  function paintDup(el, key) {
+    if (!el) return;
+
+    el.dataset.snDupPaint = '1';
+
+    // 统一淡红色，不再有单个框深红
+    el.style.outline = '1px solid #d4380d';
+    el.style.backgroundColor = '#fff1f0';
+    el.style.boxShadow = '0 0 0 1px rgba(212,56,13,.12)';
+    el.style.color = '#000';
+    el.title = '重复条码：' + key;
+
+    dupPaintEls.add(el);
+  }
+
+  function addDupLine(left, top, width, height) {
+    var div = document.createElement('div');
+
+    div.style.position = 'fixed';
+    div.style.zIndex = '2147483647';
+    div.style.left = left + 'px';
+    div.style.top = top + 'px';
+    div.style.width = width + 'px';
+    div.style.height = height + 'px';
+    div.style.background = '#d4380d';
+    div.style.borderRadius = '1px';
+    div.style.pointerEvents = 'none';
+
+    document.body.appendChild(div);
+    dupBracketEls.push(div);
+
+    return div;
+  }
+
+  function drawDupBracketForGroup(els) {
+    if (!els || els.length < 2) return;
+
+    var items = [];
+
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+
+      items.push({
+        el: els[i],
+        rect: r,
+        centerY: r.top + r.height / 2
+      });
+    }
+
+    items.sort(function (a, b) {
+      return a.centerY - b.centerY;
+    });
+
+    var first = items[0];
+    var last = items[items.length - 1];
+
+    var minLeft = Infinity;
+
+    for (var j = 0; j < items.length; j++) {
+      minLeft = Math.min(minLeft, items[j].rect.left);
+    }
+
+    // 红色括号参数
+    // 线粗 3，横线短，无左侧标签
+    var lineWidth = 3;
+    var armLen = 11;
+    var bracketLeft = Math.max(4, minLeft - 22);
+
+    // 上短横对齐最上重复框中心
+    var topCenter = first.centerY;
+
+    // 下短横对齐最下重复框中心
+    var bottomCenter = last.centerY;
+
+    if (bottomCenter - topCenter < 18) {
+      var mid = (topCenter + bottomCenter) / 2;
+      topCenter = mid - 9;
+      bottomCenter = mid + 9;
+    }
+
+    // 竖线
+    addDupLine(
+      bracketLeft,
+      topCenter,
+      lineWidth,
+      bottomCenter - topCenter
+    );
+
+    // 上短横
+    addDupLine(
+      bracketLeft,
+      topCenter - lineWidth / 2,
+      armLen,
+      lineWidth
+    );
+
+    // 下短横
+    addDupLine(
+      bracketLeft,
+      bottomCenter - lineWidth / 2,
+      armLen,
+      lineWidth
+    );
+  }
+
+  function buildDuplicateMap() {
+    var els = allSnInputs().filter(function (el) {
+      return isVisibleSnInputForDup(el) && !isSnRouteMoving(el);
+    });
+
+    var map = new Map();
+
+    for (var i = 0; i < els.length; i++) {
+      var key = normalizeSnForDup(els[i].value);
+      if (!key) continue;
+
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+
+      map.get(key).push(els[i]);
+    }
+
+    return map;
+  }
+
+  function removeDuplicateBubblesIfNeeded() {
+    var els = allSnInputs();
+
+    for (var i = 0; i < els.length; i++) {
+      var st = rowBubbleMap.get(els[i]);
+     if (st && st.text && st.text.indexOf('重复条码') >= 0) {
+  removeRowBubble(els[i]);
+}
+
+    }
+  }
+
+  function refreshDuplicateLock(preferEl) {
+    if (isDuplicateLockSuppressed()) return false;
+
+    // 每次先清掉旧括号和旧淡红
+    clearDupBrackets();
+    clearAllDupPaint();
+
+    var map = buildDuplicateMap();
+
+    var hasDup = false;
+    var targetEl = null;
+    var targetKey = '';
+
+    map.forEach(function (arr, key) {
+      if (arr.length <= 1) return;
+
+      hasDup = true;
+
+      for (var i = 0; i < arr.length; i++) {
+        paintDup(arr[i], key);
+
+        // 当前输入框在重复组里，优先把右侧气泡挂当前框
+        if (preferEl && arr[i] === preferEl) {
+          targetEl = preferEl;
+          targetKey = key;
+        }
+
+        // 没有优先目标时，锁第一个重复框
+        if (!targetEl) {
+          targetEl = arr[i];
+          targetKey = key;
+        }
+
+               // 不要在这里写 fail，避免临时重复解除后状态残留
+        // 重复判断交给 publishSnCheckGate() 动态统计
+
+      }
+
+      // 左侧红色括号，无文字
+      drawDupBracketForGroup(arr);
+    });
+
+       if (!hasDup) {
+      dupLockedEl = null;
+      clearDupBrackets();
+      clearAllDupPaint();
+      removeDuplicateBubblesIfNeeded();
+
+      // 修复：如果之前因为临时重复写入过 fail/重复条码，
+      // 但当前实际已经没有重复，则重新触发这些框的编码校验，清掉旧fail状态。
+      try {
+        var gate = JSON.parse(localStorage.getItem('sn_code_check_gate_status') || 'null');
+
+        if (gate && Array.isArray(gate.details)) {
+          gate.details.forEach(function (d) {
+            if (!d) return;
+
+            var isOldDupFail =
+              d.status === 'duplicate' ||
+              d.msg === '重复条码' ||
+              (d.status === 'fail' && d.msg === '重复条码');
+
+            if (!isOldDupFail) return;
+
+            var el = document.getElementById(d.id);
+            if (!el || !document.body.contains(el)) return;
+
+            var val = toStr(el.value);
+            if (!val) return;
+
+            // 先改成 pending，避免 gate 一直 bad
+            if (typeof setSnCheckState === 'function') {
+              setSnCheckState(el, 'pending', '重复解除待复核', val);
+            }
+
+            // 重新跑编码校验，校验通过后会变回 ok
+            if (typeof enqueueCheck === 'function') {
+              enqueueCheck(el, val);
+            } else {
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          });
+        }
+      } catch (e) {}
+
+      return false;
+    }
+
+
+    dupLockedEl = targetEl;
+
+    // 右侧气泡保留
+    if (targetEl) {
+      showRowBubble(targetEl, '重复条码：' + targetKey, 'err');
+
+      try {
+        if (document.activeElement === targetEl) {
+          targetEl.select();
+        }
+      } catch (e) {}
+    }
+
+    return true;
+  }
+
+  // 输入时刷新重复状态
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches(selector)) return;
+
+    // 脚本1自动转填期间不做重复锁定
+    if (isDuplicateLockSuppressed() || isSnRouteMoving(t)) return;
+
+    setTimeout(function () {
+      try {
+        refreshDuplicateLock(t);
+      } catch (err) {}
+    }, 0);
+  }, true);
+
+  // 按 Enter 时，如有重复则阻止继续提交
+  document.addEventListener('keydown', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches(selector)) return;
+    if (e.key !== 'Enter') return;
+
+    // 自动转填提交 Enter 时放行
+    if (isDuplicateLockSuppressed() || isSnRouteMoving(t)) return;
+
+    if (refreshDuplicateLock(t)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+
+      var focusEl = dupLockedEl || t;
+
+      setTimeout(function () {
+        try {
+          focusEl.focus();
+          focusEl.select();
+        } catch (err) {}
+      }, 0);
+    }
+  }, true);
+
+    // 按 Enter 时，如SN已被其他父项采集，也阻止继续提交
+document.addEventListener('keydown', function (e) {
+  var t = e.target;
+
+  if (!t || !t.matches || !t.matches(selector)) return;
+  if (e.key !== 'Enter') return;
+
+  if (isDuplicateLockSuppressed() || isSnRouteMoving(t)) return;
+
+  if (bomCollectCheckConflictAndLock(t, t.value)) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.stopImmediatePropagation) {
+      e.stopImmediatePropagation();
+    }
+
+    setTimeout(function () {
+      try {
+        t.focus();
+        t.select();
+      } catch (err) {}
+    }, 0);
+  }
+}, true);
+
+  // 滚动时重新定位左侧括号
+  window.addEventListener('scroll', function () {
+    try {
+      if (dupLockedEl) refreshDuplicateLock(dupLockedEl);
+    } catch (e) {}
+  }, true);
+
+  // 窗口变化时重新定位左侧括号
+  window.addEventListener('resize', function () {
+    try {
+      if (dupLockedEl) refreshDuplicateLock(dupLockedEl);
+    } catch (e) {}
+  }, true);
+
+  // 页面动态刷新时重新判断
+  setInterval(function () {
+    try {
+      if (!document.querySelector(selector)) return;
+      refreshDuplicateLock(document.activeElement);
+    } catch (e) {}
+  }, 800);
+
+
+
+  // ===== 无对应编码时自动重试，防止扫太快接口数据还没出来 =====
+  const NO_CODE_RETRY_MAX = 6;
+  const NO_CODE_RETRY_DELAYS = [300, 600, 1000, 1500, 2200, 3000];
+  const noCodeRetryMap = new WeakMap();
+
+  function retrySnKey(snRaw) {
+    return normalizeSnForDup(snRaw || '');
+  }
+
+  function resetNoCodeRetry(el) {
+    noCodeRetryMap.delete(el);
+  }
+
+  function scheduleNoCodeRetry(el, snRaw) {
+    if (!el || !document.body.contains(el)) return false;
+
+    var key = retrySnKey(snRaw);
+    if (!key) return false;
+
+    var st = noCodeRetryMap.get(el);
+    if (!st || st.key !== key) {
+      st = {
+        key: key,
+        count: 0,
+        token: 0
+      };
+      noCodeRetryMap.set(el, st);
+    }
+
+    if (st.count >= NO_CODE_RETRY_MAX) {
+      return false;
+    }
+
+    st.count++;
+    st.token++;
+
+    var token = st.token;
+    var delay = NO_CODE_RETRY_DELAYS[Math.min(st.count - 1, NO_CODE_RETRY_DELAYS.length - 1)];
+
+    showRowBubble(el, '未查到编码，重试 ' + st.count + '/' + NO_CODE_RETRY_MAX, 'warn');
+
+    setTimeout(function () {
+      if (!el || !document.body.contains(el)) return;
+
+      var latest = noCodeRetryMap.get(el);
+      if (!latest || latest.key !== key || latest.token !== token) return;
+
+      var curr = toStr(el.value);
+      if (!curr || retrySnKey(curr) !== key) return;
+
+      enqueueCheck(el, snRaw);
+    }, delay);
+
+    return true;
+  }
+
+
+  // ===== 给自动过站脚本读取：BOM子项SN校验状态 =====
+  const SN_CODE_CHECK_GATE_KEY = 'sn_code_check_gate_status';
+  const snCheckStateMap = new WeakMap();
+  // gate发现有值但没校验状态时，自动补校验，避免永久pending
+  const gatePendingKickMap = new WeakMap();
+
+  function kickPendingGateCheck(el, val, reason) {
+    if (!el || !document.body.contains(el)) return;
+    val = toStr(val);
+    if (!val) return;
+
+    var key = normalizeSnForDup(val);
+    var now = Date.now();
+    var old = gatePendingKickMap.get(el);
+
+    // 同一个值3秒内只补触发一次，避免死循环刷接口
+    if (old && old.key === key && now - old.ts < 3000) return;
+
+    gatePendingKickMap.set(el, {
+      key: key,
+      ts: now,
+      reason: reason || ''
+    });
+
+    setTimeout(function () {
+      try {
+        if (!el || !document.body.contains(el)) return;
+        if (normalizeSnForDup(el.value) !== key) return;
+
+        enqueueCheck(el, val);
+      } catch (e) {}
+    }, 0);
+  }
+
+  function getParentBarcodeValueForGate() {
+    var all = [].slice.call(document.querySelectorAll(
+      'div[id^="Input_"] > input.hae-ui-input[type="text"], div[id^="Input_"] > input'
+    ));
+
+    for (var i = 0; i < all.length; i++) {
+      var box = all[i].closest('div[id^="Input_"]');
+      var ctx = ((box && box.parentElement ? box.parentElement.innerText : '') || '').replace(/\s+/g, '');
+      if (ctx.indexOf('条码采集') >= 0) {
+        return toStr(all[i].value);
+      }
+    }
+
+    return '';
+  }
+
+  function publishSnCheckGate() {
+    var els = [].slice.call(document.querySelectorAll(selector));
+
+    // 只统计当前页面可见的BOM子项SN框
+    els = els.filter(function (el) {
+      var r = el.getBoundingClientRect();
+      return document.body.contains(el) && r.width > 0 && r.height > 0;
+    });
+
+    var parentSn = getParentBarcodeValueForGate();
+
+    var total = els.length;
+    var filled = 0;
+    var ok = 0;
+    var bad = 0;
+    var pending = 0;
+    var duplicate = 0;
+    var duplicateGroups = 0;
+    var details = [];
+
+    // 先统计清洗后的SN，用于判断重复
+    // 例如 U1:21340902 和 21340902 清洗后都等于 21340902
+    var dupCount = {};
+
+    for (var d = 0; d < els.length; d++) {
+      var dv = toStr(els[d].value);
+      if (!dv) continue;
+
+      var dk = normalizeSnForDup(dv);
+      if (!dk) continue;
+
+      dupCount[dk] = (dupCount[dk] || 0) + 1;
+    }
+
+    Object.keys(dupCount).forEach(function (k) {
+      if (dupCount[k] > 1) {
+        duplicateGroups++;
+        duplicate += dupCount[k];
+      }
+    });
+
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var val = toStr(el.value);
+      var cleanVal = normalizeSnForDup(val);
+
+      if (!val) {
+        pending++;
+        details.push({
+          id: el.id || '',
+          sn: '',
+          cleanSn: '',
+          status: 'empty',
+          msg: '未扫描'
+        });
+        continue;
+      }
+
+      filled++;
+
+      // 重复条码优先判失败
+      if (cleanVal && dupCount[cleanVal] > 1) {
+        bad++;
+        details.push({
+          id: el.id || '',
+          sn: val,
+          cleanSn: cleanVal,
+          status: 'duplicate',
+          msg: '重复条码'
+        });
+        continue;
+      }
+
+      var st = snCheckStateMap.get(el);
+      var currKey = normalizeSnForDup(val);
+      var stKey = st ? normalizeSnForDup(st.sn) : '';
+
+           if (!st || stKey !== currKey) {
+        pending++;
+
+        // 有值但没有对应校验状态，自动补一次校验
+        kickPendingGateCheck(el, val, !st ? '无校验状态' : '校验值不一致');
+
+        details.push({
+          id: el.id || '',
+          sn: val,
+          cleanSn: cleanVal,
+          status: 'pending',
+          msg: !st ? '等待校验-已补触发' : '等待校验-值变更'
+        });
+        continue;
+      }
+
+
+      if (st.status === 'ok') {
+        ok++;
+      } else if (st.status === 'pending' || st.status === 'retry') {
+        pending++;
+      } else {
+        bad++;
+      }
+
+      details.push({
+        id: el.id || '',
+        sn: val,
+        cleanSn: cleanVal,
+        status: st.status,
+        msg: st.msg || ''
+      });
+    }
+
+    var data = {
+      ts: Date.now(),
+      parentSn: parentSn,
+      total: total,
+      filled: filled,
+      ok: ok,
+      bad: bad,
+      pending: pending,
+     duplicate: duplicate,
+     duplicateGroups: duplicateGroups,
+
+
+      // 必须：有子项框、全部填写、全部校验OK、无重复
+      allOk: total > 0 &&
+             filled === total &&
+             ok === total &&
+             bad === 0 &&
+             pending === 0 &&
+             duplicate === 0,
+
+      details: details
+    };
+
+  try {
+  window.__SN_CODE_CHECK_GATE = data;
+  localStorage.setItem(SN_CODE_CHECK_GATE_KEY, JSON.stringify(data));
+  window.dispatchEvent(new CustomEvent('sn-code-check-gate', { detail: data }));
+} catch (e) {}
+
+try {
+  bomCollectSaveWhenGateAllOk(data);
+} catch (e) {
+  console.warn('[BOM采集记录] 保存失败：', e);
+}
+
+
+
+  }
+
+  function setSnCheckState(el, status, msg, sn) {
+    if (!el) return;
+
+    if (status === 'empty') {
+      snCheckStateMap.delete(el);
+    } else {
+      snCheckStateMap.set(el, {
+        status: status,
+        msg: msg || '',
+        sn: sn || toStr(el.value),
+        ts: Date.now()
+      });
+    }
+
+    publishSnCheckGate();
+  }
+
+  // 定时刷新状态，防止系统带出/删除SN框后状态不同步
+  setInterval(function () {
+    try { publishSnCheckGate(); } catch (e) {}
+  }, 1000);
+
+
+    // 修复1：脚本主动清空时，禁止空值回放
+  const suppressEmptyReplay = new WeakSet();
+
+  // 修复2：串行队列，防并发归位打架
+  let __scanChain = Promise.resolve();
+  function enqueueCheck(el, sn){
+    __scanChain = __scanChain
+      .then(async function () {
+        if (!el || !document.body.contains(el)) return;
+        await runCheckOne(el, sn);
+      })
+      .catch(function(){});
+  }
+
+  let lockedInput = null;
+  let lockedValue = '';
+
+ const hoverCardMap = new WeakMap();
+const hoverCache = new Map();
+let hoverCurrentEl = null;
+
+function syncSwitchFromStorage() {
+  lockOn = localStorage.getItem(LOCK_SWITCH_KEY) === '1';
+  autoRouteOn = localStorage.getItem(AUTO_ROUTE_KEY) !== '0';
+}
+
+  window.addEventListener('storage', function (e) {
+    if (e.key === LOCK_SWITCH_KEY || e.key === AUTO_ROUTE_KEY) syncSwitchFromStorage();
+  });
+
+  function toStr(v){ return v == null ? '' : String(v).trim(); }
+ function normSn(v){
+  v = toStr(v).replace(/\s+/g, '');
+  if (v.indexOf(':') >= 0) v = v.split(':').pop();
+  return v;
+}
+
+
+  function normalizeForCompare(v){
+    return toStr(v).replace(/\u00A0/g, ' ').replace(/\s+/g, '').replace(/：/g, ':').toUpperCase();
+  }
+
+  function normalizeSnForDup(v){
+    v = toStr(v).replace(/\u00A0/g, ' ').replace(/\s+/g, '').trim();
+    if (v.indexOf('：') >= 0) v = v.split('：').pop();
+    if (v.indexOf(':') >= 0) v = v.split(':').pop();
+    return v.toUpperCase();
+  }
+// ===== 左侧条码自定义清洗规则 =====
+function loadLeftCleanRules() {
+  try {
+    var arr = JSON.parse(localStorage.getItem(LEFT_CLEAN_KEY) || '[]');
+
+    if (Array.isArray(arr)) {
+      var out = [];
+
+      arr.forEach(function (x) {
+        x = toStr(x)
+          .replace(/\u00A0/g, ' ')
+          .replace(/\s+/g, '')
+          .replace(/：/g, ':')
+          .replace(/－/g, '-');
+
+        if (x && out.indexOf(x) < 0) {
+          out.push(x);
+        }
+      });
+
+      return out;
+    }
+  } catch (e) {}
+
+  return [];
+}
+
+function cleanLeftByRules(seg) {
+  var s = toStr(seg)
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, '')
+    .replace(/：/g, ':')
+    .replace(/－/g, '-');
+
+  if (!s) return '';
+
+  var rules = loadLeftCleanRules();
+
+  for (var i = 0; i < rules.length; i++) {
+    var r = rules[i];
+    if (!r) continue;
+
+    // 配置 ":"：清洗冒号前面的任意字符
+    // U1:213409015510S4104636 => 213409015510S4104636
+    if (r === ':') {
+      var p = s.indexOf(':');
+      if (p >= 0) {
+        s = s.slice(p + 1);
+      }
+      continue;
+    }
+
+    // 配置 "-"：清洗横杠前面的任意字符
+    // ABC-34090213 => 34090213
+    if (r === '-') {
+      var p2 = s.indexOf('-');
+      if (p2 >= 0) {
+        s = s.slice(p2 + 1);
+      }
+      continue;
+    }
+
+    // 普通固定前缀：
+    // 配置 SN：SN03035FDT => 03035FDT
+    if (s.toUpperCase().indexOf(r.toUpperCase()) === 0) {
+      s = s.slice(r.length);
+    }
+  }
+
+  return s;
+}
+
+// 只用于左侧条码的清洗，不影响接口查出来的编码
+function extractLeftCodeSmart(text) {
+  text = toStr(text).replace(/\u00A0/g, ' ').replace(/：/g, ':');
+
+  var parts = text.split(/\s+/).filter(Boolean);
+  var last = '';
+
+  for (var i = 0; i < parts.length; i++) {
+    var seg = parts[i];
+
+    // 先执行自定义左侧清洗
+    seg = cleanLeftByRules(seg);
+
+    // 保留原来逻辑：冒号后内容优先
+    if (seg.indexOf(':') >= 0) {
+      seg = seg.split(':').pop();
+    }
+
+    // 保留原来逻辑：带字母前缀的 xxx- / xxx_ 去掉
+    seg = seg.replace(/^(?=[A-Z0-9]*[A-Z])[A-Z0-9]+[-_]/i, '');
+
+    seg = normalizeForCompare(seg);
+
+    if (seg) last = seg;
+  }
+
+  return last || normalizeForCompare(cleanLeftByRules(text));
+}
+// ===== 父项条码-BOM-SN采集记录 START =====
+function bomCollectParentKey(v) {
+  return normalizeSnForDup(v);
+}
+
+function bomCollectSnKey(v) {
+  return normalizeSnForDup(v);
+}
+
+function bomCollectLoadStore() {
+  var store = null;
+
+  try {
+    store = JSON.parse(localStorage.getItem(BOM_COLLECT_STORE_KEY) || 'null');
+  } catch (e) {}
+
+  if (!store || typeof store !== 'object') {
+    store = {
+      parents: {},
+      snIndex: {}
+    };
+  }
+
+  if (!store.parents || typeof store.parents !== 'object') {
+    store.parents = {};
+  }
+
+  if (!store.snIndex || typeof store.snIndex !== 'object') {
+    store.snIndex = {};
+  }
+
+  return store;
+}
+
+function bomCollectRebuildIndex(store) {
+  store.snIndex = {};
+
+  Object.keys(store.parents || {}).forEach(function (parentKey) {
+    var p = store.parents[parentKey];
+    if (!p || !Array.isArray(p.items)) return;
+
+    p.items.forEach(function (item) {
+      if (!item || !item.cleanSn) return;
+
+      if (!store.snIndex[item.cleanSn]) {
+        store.snIndex[item.cleanSn] = [];
+      }
+
+      store.snIndex[item.cleanSn].push({
+        parentKey: parentKey,
+        parentSn: p.parentSn || parentKey,
+        bomCode: item.bomCode || '',
+        sn: item.sn || '',
+        cleanSn: item.cleanSn || '',
+        ts: p.ts || item.ts || 0
+      });
+    });
+  });
+
+  return store;
+}
+
+function bomCollectPrune(store) {
+  var keys = Object.keys(store.parents || {});
+
+  if (keys.length <= BOM_COLLECT_MAX_PARENT) {
+    return store;
+  }
+
+  keys.sort(function (a, b) {
+    var pa = store.parents[a] || {};
+    var pb = store.parents[b] || {};
+    return Number(pb.ts || 0) - Number(pa.ts || 0);
+  });
+
+  var keep = {};
+  keys.slice(0, BOM_COLLECT_MAX_PARENT).forEach(function (k) {
+    keep[k] = store.parents[k];
+  });
+
+  store.parents = keep;
+
+  return store;
+}
+
+function bomCollectSaveStore(store) {
+  store = bomCollectPrune(store);
+  store = bomCollectRebuildIndex(store);
+
+  try {
+    localStorage.setItem(BOM_COLLECT_STORE_KEY, JSON.stringify(store));
+  } catch (e) {}
+
+  return store;
+}
+
+function bomCollectSaveWhenGateAllOk(gateData) {
+  if (!gateData || !gateData.allOk) return false;
+
+  var parentRaw = toStr(gateData.parentSn);
+  var parentKey = bomCollectParentKey(parentRaw);
+
+  if (!parentKey) return false;
+
+  if (!Array.isArray(gateData.details) || !gateData.details.length) {
+    return false;
+  }
+
+  var now = Date.now();
+  var items = [];
+
+  gateData.details.forEach(function (d) {
+    if (!d) return;
+    if (d.status !== 'ok') return;
+
+    var sn = toStr(d.sn);
+    var cleanSn = bomCollectSnKey(d.cleanSn || d.sn);
+
+    if (!sn || !cleanSn) return;
+
+    var el = d.id ? document.getElementById(d.id) : null;
+    var leftText = el ? getNearCode(el) : '';
+    var bomCode = extractLeftCodeSmart(leftText);
+
+    items.push({
+      id: d.id || '',
+      sn: sn,
+      cleanSn: cleanSn,
+      bomCode: bomCode || '',
+      leftText: leftText || '',
+      ts: now
+    });
+  });
+
+  if (!items.length) return false;
+
+  var store = bomCollectLoadStore();
+
+  store.parents[parentKey] = {
+    parentKey: parentKey,
+    parentSn: parentRaw || parentKey,
+    ts: now,
+    count: items.length,
+    items: items
+  };
+
+  bomCollectSaveStore(store);
+
+  console.log('[BOM采集记录] 已保存父项BOM-SN关系：', {
+    parentSn: parentRaw || parentKey,
+    count: items.length,
+    items: items
+  });
+
+  return true;
+}
+
+function bomCollectFindConflict(snRaw, currentParentRaw) {
+  var cleanSn = bomCollectSnKey(snRaw);
+  if (!cleanSn) return null;
+
+  var currentParentKey = bomCollectParentKey(currentParentRaw || getParentBarcodeValueForGate());
+  if (!currentParentKey) return null;
+
+  var store = bomCollectLoadStore();
+  var arr = store.snIndex && store.snIndex[cleanSn];
+
+  if (!Array.isArray(arr) || !arr.length) {
+    store = bomCollectRebuildIndex(store);
+    arr = store.snIndex && store.snIndex[cleanSn];
+  }
+
+  if (!Array.isArray(arr) || !arr.length) return null;
+
+  for (var i = 0; i < arr.length; i++) {
+    var item = arr[i];
+    if (!item) continue;
+
+    if (item.parentKey && item.parentKey !== currentParentKey) {
+      return item;
+    }
+  }
+
+  return null;
+}
+
+function bomCollectUnlockKey(el, snRaw) {
+  var parentKey = bomCollectParentKey(getParentBarcodeValueForGate());
+  var snKey = bomCollectSnKey(snRaw || (el ? el.value : ''));
+
+  if (!parentKey || !snKey) return '';
+
+  return parentKey + '|' + snKey;
+}
+
+function bomCollectIsUnlocked(el, snRaw) {
+  var key = bomCollectUnlockKey(el, snRaw);
+  if (!key) return false;
+
+  var st = bomCollectUnlockMap.get(el);
+
+  return !!(st && st.key === key);
+}
+
+function bomCollectUnlockInput(el) {
+  if (!el) return;
+
+  var key = bomCollectUnlockKey(el, el.value);
+
+  if (!key) return;
+
+  bomCollectUnlockMap.set(el, {
+    key: key,
+    ts: Date.now()
+  });
+
+  console.log('[BOM采集记录] 已手动解锁：', key);
+}
+
+function bomCollectCheckConflictAndLock(el, snRaw) {
+  if (!el || !document.body.contains(el)) return false;
+
+  snRaw = toStr(snRaw || el.value);
+
+  if (!snRaw) return false;
+
+  if (bomCollectIsUnlocked(el, snRaw)) {
+    return false;
+  }
+
+  var hit = bomCollectFindConflict(snRaw, getParentBarcodeValueForGate());
+
+  if (!hit) return false;
+
+  var cleanSn = bomCollectSnKey(snRaw);
+
+  var msg =
+    'SN【' + cleanSn + '】已被父项【' + (hit.parentSn || hit.parentKey || '') + '】采集' +
+    (hit.bomCode ? '，BOM【' + hit.bomCode + '】' : '');
+
+  try {
+    setSnCheckState(el, 'fail', msg, snRaw);
+  } catch (e) {}
+
+  try {
+    showRowBubble(el, msg, 'err');
+  } catch (e2) {}
+
+  try {
+    lockedInput = el;
+    lockedValue = toStr(el.value);
+  } catch (e3) {}
+
+  setTimeout(function () {
+    try {
+      el.focus();
+      el.select();
+    } catch (e4) {}
+  }, 0);
+
+  console.warn('[BOM采集记录] 发现跨父项重复采集：', {
+    sn: cleanSn,
+    currentParent: getParentBarcodeValueForGate(),
+    oldParent: hit.parentSn || hit.parentKey,
+    bomCode: hit.bomCode || ''
+  });
+
+  return true;
+}
+// ===== 父项条码-BOM-SN采集记录 END =====
+
+  // 仅删含字母前缀
+  function extractCodeSmart(text){
+    text = toStr(text).replace(/\u00A0/g, ' ').replace(/：/g, ':');
+    var parts = text.split(/\s+/).filter(Boolean);
+    var last = '';
+
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i];
+      if (seg.indexOf(':') >= 0) seg = seg.split(':').pop();
+      seg = seg.replace(/^(?=[A-Z0-9]*[A-Z])[A-Z0-9]+[-_]/i, '');
+      seg = normalizeForCompare(seg);
+      if (seg) last = seg;
+    }
+    return last || normalizeForCompare(text);
+  }
+
+  function isCodeEqual(leftText, actualCode){
+  var L = extractLeftCodeSmart(leftText);
+  var A = extractCodeSmart(actualCode);
+  return !!L && !!A && L === A;
+}
+
+
+  // ===== 左侧定位 =====
+  function nearestLeftCodeCell(inputEl){
+    var ir = inputEl.getBoundingClientRect();
+    var cands = [].slice.call(document.querySelectorAll('td.grid-cell'));
+    var best = null, bestScore = Infinity;
+
+    for (var i = 0; i < cands.length; i++) {
+      var td = cands[i];
+      var r = td.getBoundingClientRect();
+      if (r.right > ir.left) continue;
+
+      var dy = Math.abs((r.top + r.height / 2) - (ir.top + ir.height / 2));
+      var dx = ir.left - r.right;
+      if (dy > 80 || dx > 700) continue;
+
+      var bonus = (td.className || '').indexOf('col0') >= 0 ? -20 : 0;
+      var score = dy * 3 + dx + bonus;
+      if (score < bestScore) { bestScore = score; best = td; }
+    }
+    return best;
+  }
+
+  function findCodeNodeByInput(el){ return nearestLeftCodeCell(el); }
+  function findCodeByInput(el){ return findCodeNodeByInput(el); } // 兜底别名
+  function getNearCode(el){
+    var td = findCodeNodeByInput(el);
+    return td ? toStr(td.innerText) : '';
+  }
+
+ // ===== 查询 =====
+function isStrongCode(v){ return /^(34|45)\d{6}(-\d{3})?$/.test(toStr(v)); }
+function isWeakCode(v){ return /^\d{8}(-\d{3})?$/.test(toStr(v)); }
+function looksLikeDate8(v){ return /^20\d{6}$/.test(toStr(v)); }
+
+// 新增：9开头，8位，或带-3位偏码
+function isNineCode(v){
+  v = toStr(v).toUpperCase();
+  return /^9[A-Z0-9]{7}(?:-\d{3})?$/.test(v);
+}
+
+function pickFirstMatchedCode(obj){
+  var strong = '';
+  var weak = '';
+  var nine = '';
+
+  (function walk(x){
+    if (x == null) return;
+
+    if (typeof x !== 'object') {
+      var s = toStr(x).toUpperCase();
+      if (!s) return;
+
+      if (!strong && isStrongCode(s)) { strong = s; return; }
+      if (!weak && isWeakCode(s) && !looksLikeDate8(s)) weak = s;
+      if (!nine && isNineCode(s)) nine = s;
+      return;
+    }
+
+    if (Array.isArray(x)) { for (var i = 0; i < x.length; i++) walk(x[i]); return; }
+
+    var keys = Object.keys(x);
+    for (var k = 0; k < keys.length; k++) walk(x[keys[k]]);
+  })(obj);
+
+  return strong || weak || nine || '';
+}
+
+  async function fetchPage(sn, pageSize, pageNo, a, b){
+    var url = BASE + '/' + pageSize + '/' + pageNo + '/' + a + '/' + b;
+    var body = { barCode:'', snStr:sn, itemName:'', componentType:'', createdFrom:'', createdTo:'' };
+
+    var r = await fetch(url, {
+      method:'POST',
+      credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+
+    return JSON.parse(await r.text());
+  }
+
+  async function queryAllRows(snRaw, pageSize){
+    pageSize = pageSize || 100;
+    var sn = normSn(snRaw);
+    var modes = [[0,0],[7,0]];
+    var best = { sn: sn, rows: [], mode: '-' };
+
+    for (var i = 0; i < modes.length; i++) {
+      var a = modes[i][0], b = modes[i][1];
+      var page = 1, totalPages = 1, rows = [];
+
+      do {
+        var j = await fetchPage(sn, pageSize, page, a, b);
+        var vo = (j && j.resultObjVO) || {};
+        var pageVO = vo.pageVO || {};
+        rows = rows.concat(vo.result || []);
+        totalPages = Number(pageVO.totalPages || 1);
+        page++;
+      } while (page <= totalPages);
+
+      if (rows.length) return { sn: sn, rows: rows, mode: a + '/' + b };
+      best = { sn: sn, rows: rows, mode: a + '/' + b };
+    }
+    return best;
+  }
+
+  async function queryCodeBySn_OpenApi(snRaw){
+    var sn = normSn(snRaw);
+    var url = 'https://w3.huawei.com/mes/qmgateway/com.huawei.supply.mes.mesplus.qm:mesqmmitrservice/mes/mitrservice/services/openapi/getSnAttr';
+
+    var r = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sn: sn })
+    });
+
+    var j = await r.json();
+    var vo = (j && j.resultObjVO) || {};
+    return { sn: sn, code: toStr(vo.partNo), source: 'openapi', mode: '-', rows: 0 };
+  }
+
+  async function queryCodeHybrid(snRaw){
+    var q1 = await queryAllRows(snRaw, 100);
+    var code1 = pickFirstMatchedCode(q1.rows);
+    if (code1) return { sn: q1.sn, code: code1, source: 'ems-find', mode: q1.mode, rows: q1.rows.length };
+    return queryCodeBySn_OpenApi(snRaw);
+  }
+
+  // ===== 自动归位 =====
+  function allSnInputs(){
+    var arr = [].slice.call(document.querySelectorAll(selector));
+    arr.sort(function (a, b) {
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var dy = ra.top - rb.top;
+      if (Math.abs(dy) > 4) return dy;
+      return ra.left - rb.left;
+    });
+    return arr;
+  }
+
+  function hasDuplicateSn(snRaw, ignoreEl){
+    var sn = normalizeSnForDup(snRaw);
+    if (!sn) return false;
+
+    var els = allSnInputs();
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (ignoreEl && el === ignoreEl) continue;
+      var v = normalizeSnForDup(el.value);
+      if (v && v === sn) return true;
+    }
+    return false;
+  }
+
+  function findTargetInputByActualCode(actualCode, excludeEl){
+    var A = extractCodeSmart(actualCode);
+    if (!A) return null;
+
+    var els = allSnInputs();
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el === excludeEl) continue;
+      var left = extractLeftCodeSmart(getNearCode(el));
+      if (left && left === A && !toStr(el.value)) return el;
+    }
+    return null;
+  }
+
+  function commitInputByEnter(el){
+    if (!el) return;
+    try { el.focus(); } catch(e){}
+
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  }
+
+  function tryAutoRouteWrongScan(currEl, snRaw, actualCode){
+    if (!toStr(snRaw) || !toStr(actualCode)) return null;
+    if (hasDuplicateSn(snRaw, currEl)) return null;
+
+    var target = findTargetInputByActualCode(actualCode, currEl);
+    if (!target) return null;
+
+    if (hasDuplicateSn(snRaw, currEl)) return null;
+
+        // 自动转填期间，暂停重复锁定，避免临时重复误锁
+    suppressDuplicateLockForRoute(1200);
+
+    target.dataset.snAutoFill = '1';
+    target.dataset.snRouteMoving = '1';
+    target.dataset.autoFilled = '1';
+
+    currEl.dataset.snRouteMoving = '1';
+
+    target.value = snRaw;
+
+    setSnCheckState(target, 'pending', '自动转填待校验', snRaw);
+
+
+    setTimeout(function () {
+      try { commitInputByEnter(target); } catch(e){}
+           setTimeout(function () {
+        try { enqueueCheck(target, toStr(target.value) || snRaw); } catch(e2){}
+      }, 60);
+
+    }, 0);
+
+    // 修复1：清空原框时同步模型 + 清缓存 + 禁止空值回放
+    currEl.value = '';
+    lastScanByInput.delete(currEl);
+    setSnCheckState(currEl, 'empty', '已转填', '');
+    suppressEmptyReplay.add(currEl);
+
+
+    currEl.dispatchEvent(new Event('input', { bubbles: true }));
+    currEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+    setTimeout(function () { suppressEmptyReplay.delete(currEl); }, 300);
+    // 自动转填结束后，清除标记，并重新检查真实重复
+    setTimeout(function () {
+      try { delete target.dataset.snAutoFill; } catch(e){}
+      try { delete target.dataset.snRouteMoving; } catch(e){}
+      try { delete currEl.dataset.snRouteMoving; } catch(e){}
+
+      try { refreshDuplicateLock(target); } catch(e2){}
+    }, 1200);
+
+    // 保持你原行为：回当前框并全选
+    setTimeout(function () { try { currEl.focus(); currEl.select(); } catch(e){} }, 80);
+
+    return target;
+  }
+
+  function focusNextEmptyFrom(el){
+    var els = allSnInputs();
+    var idx = els.indexOf(el);
+    if (idx < 0) return null;
+    for (var i = idx + 1; i < els.length; i++) {
+      if (!toStr(els[i].value)) return els[i];
+    }
+    return null;
+  }
+
+  // ===== 气泡 =====
+  function ensureRowBubble(inputEl){
+    var st = rowBubbleMap.get(inputEl);
+
+    if (!st) {
+      var box = document.createElement('div');
+      var arrow = document.createElement('div');
+
+      document.body.appendChild(box);
+      document.body.appendChild(arrow);
+
+      st = { box: box, arrow: arrow, type: 'warn', text: '' };
+      rowBubbleMap.set(inputEl, st);
+      rowBubbleKeys.add(inputEl);
+    }
+
+    // 每次都强制刷新样式，避免旧样式残留导致只有一个小豆豆
+    st.box.style.position = 'fixed';
+    st.box.style.zIndex = '2147483647';
+    st.box.style.display = 'block';
+    st.box.style.visibility = 'visible';
+    st.box.style.boxSizing = 'border-box';
+    st.box.style.width = 'auto';
+    st.box.style.minWidth = '80px';
+   st.box.style.maxWidth = '520px';
+      st.box.style.minHeight = '24px';
+      st.box.style.padding = '6px 10px';
+      st.box.style.borderRadius = '6px';
+      st.box.style.color = '#fff';
+      st.box.style.fontSize = '12px';
+      st.box.style.fontWeight = '400';
+      st.box.style.lineHeight = '18px';
+      st.box.style.textAlign = 'left';
+      st.box.style.boxShadow = '0 4px 12px rgba(0,0,0,.2)';
+      st.box.style.whiteSpace = 'normal';
+      st.box.style.wordBreak = 'break-all';
+      st.box.style.overflowWrap = 'anywhere';
+      st.box.style.overflow = 'visible';
+      st.box.style.pointerEvents = 'none';
+
+
+    st.arrow.style.position = 'fixed';
+    st.arrow.style.zIndex = '2147483647';
+    st.arrow.style.width = '0';
+    st.arrow.style.height = '0';
+    st.arrow.style.pointerEvents = 'none';
+    st.arrow.style.display = 'block';
+
+    return st;
+  }
+
+
+  function positionRowBubble(inputEl){
+    var st = rowBubbleMap.get(inputEl);
+    if (!st) return;
+    if (!document.body.contains(inputEl)) return removeRowBubble(inputEl);
+
+    var r = inputEl.getBoundingClientRect();
+
+    // 确保文字已经撑开后再取宽高
+    var bw = st.box.getBoundingClientRect().width || st.box.offsetWidth || 120;
+    var bh = st.box.getBoundingClientRect().height || st.box.offsetHeight || 28;
+    st.box.style.maxWidth = Math.min(520, window.innerWidth - 40) + 'px';
+    st.box.style.width = 'auto';
+
+    var arrow = 6;
+    var gap = 8;
+
+    // 默认放右边
+    var left = r.right + gap + arrow;
+
+    // 如果右边空间不够，贴到视窗右边，但仍然保持在右侧区域
+    if (left + bw > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - bw - 8);
+    }
+
+    var top = r.top + (r.height - bh) / 2;
+
+    if (top < 8) top = 8;
+    if (top + bh > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - bh - 8);
+    }
+
+    st.box.style.left = left + 'px';
+    st.box.style.top = top + 'px';
+
+    // 箭头在气泡左侧，指向SN框
+    st.arrow.style.left = (left - arrow * 2 + 1) + 'px';
+    st.arrow.style.top = (top + bh / 2 - arrow) + 'px';
+  }
+
+
+
+
+  function showRowBubble(inputEl, text, type){
+    var st = ensureRowBubble(inputEl);
+
+    st.type = type || 'warn';
+    st.text = text || '';
+
+    var bg = '#d48806';
+    if (st.type === 'err') bg = '#d4380d';
+    if (st.type === 'warn') bg = '#d48806';
+    if (st.type === 'ok') bg = '#389e0d';
+
+    st.box.style.background = bg;
+    st.box.style.color = '#fff';
+    st.box.textContent = st.text || '提示';
+
+    // 先清空箭头旧样式，防止左箭头/右箭头样式叠加成小豆豆
+    st.arrow.style.borderTop = '0';
+    st.arrow.style.borderBottom = '0';
+    st.arrow.style.borderLeft = '0';
+    st.arrow.style.borderRight = '0';
+
+    // 气泡在右边，所以箭头在气泡左侧，尖头朝左，指向SN框
+    st.arrow.style.borderTop = '6px solid transparent';
+    st.arrow.style.borderBottom = '6px solid transparent';
+    st.arrow.style.borderRight = '6px solid ' + bg;
+    st.arrow.style.borderLeft = '0';
+
+    positionRowBubble(inputEl);
+
+    // 再延迟一帧重新定位，确保文字宽度生效
+    requestAnimationFrame(function () {
+      positionRowBubble(inputEl);
+    });
+  }
+
+
+
+  function removeRowBubble(inputEl){
+    var st = rowBubbleMap.get(inputEl);
+    if (!st) return;
+    if (st.box && st.box.parentNode) st.box.parentNode.removeChild(st.box);
+    if (st.arrow && st.arrow.parentNode) st.arrow.parentNode.removeChild(st.arrow);
+    rowBubbleMap.delete(inputEl);
+    rowBubbleKeys.delete(inputEl);
+  }
+
+  function removeAllRowBubbles(){ rowBubbleKeys.forEach(function(el){ removeRowBubble(el); }); }
+  function refreshAllBubblePos(){ rowBubbleKeys.forEach(function(el){ positionRowBubble(el); }); }
+
+  window.addEventListener('scroll', refreshAllBubblePos, true);
+  window.addEventListener('resize', refreshAllBubblePos, true);
+
+  // ===== 白底悬浮信息卡（放在SN框下方）=====
+  function ensureHoverCard(inputEl){
+    var card = hoverCardMap.get(inputEl);
+    if (card) return card;
+
+    card = document.createElement('div');
+    card.style.position = 'fixed';
+    card.style.zIndex = '2147483646';
+    card.style.maxWidth = '380px';
+    card.style.padding = '8px 10px';
+    card.style.borderRadius = '8px';
+    card.style.background = '#fff';
+    card.style.color = '#333';
+    card.style.border = '1px solid #d9d9d9';
+    card.style.fontSize = '12px';
+    card.style.lineHeight = '1.5';
+    card.style.whiteSpace = 'pre-line';
+    card.style.pointerEvents = 'none';
+    card.style.boxShadow = '0 6px 20px rgba(0,0,0,.15)';
+    card.style.display = 'none';
+
+    document.body.appendChild(card);
+    hoverCardMap.set(inputEl, card);
+    return card;
+  }
+
+  function positionHoverCard(inputEl){
+    var card = hoverCardMap.get(inputEl);
+    if (!card) return;
+
+    var r = inputEl.getBoundingClientRect();
+    var left = r.left;
+    var top = r.bottom + 6; // 放在下方
+
+    var maxW = 380;
+    if (left + maxW > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - maxW - 8);
+    }
+
+    var cardH = card.offsetHeight || 120;
+    if (top + cardH > window.innerHeight - 8) {
+      top = Math.max(8, r.top - cardH - 6); // 放不下就上方
+    }
+
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
+  }
+
+  function hideHoverCard(inputEl){
+    var card = hoverCardMap.get(inputEl);
+    if (card) card.style.display = 'none';
+    if (hoverCurrentEl === inputEl) hoverCurrentEl = null;
+  }
+
+  async function queryHoverInfo(snRaw){
+    var sn = normSn(snRaw);
+    if (!sn) return null;
+
+    var hit = hoverCache.get(sn);
+    var now = Date.now();
+    if (hit && (now - hit.ts < 15000)) return hit.data;
+
+    var q = await queryCodeHybrid(sn);
+    var data = {
+      sn: q.sn || sn,
+      code: toStr(q.code),
+      source: q.source || '-',
+      mode: q.mode || '-',
+      rows: q.rows || 0
+    };
+    hoverCache.set(sn, { ts: now, data: data });
+    return data;
+  }
+
+  async function showHoverInfo(inputEl){
+    var snRaw = toStr(inputEl.value);
+    if (!snRaw) return hideHoverCard(inputEl);
+
+    hoverCurrentEl = inputEl;
+
+    var leftRaw = getNearCode(inputEl) || '';
+    var leftFiltered = extractLeftCodeSmart(leftRaw) || '(无)';
+    var card = ensureHoverCard(inputEl);
+
+    card.textContent = '左侧(过滤后): ' + leftFiltered + '\n查询中...';
+    card.style.display = 'block';
+    positionHoverCard(inputEl);
+
+    try {
+      var info = await queryHoverInfo(snRaw);
+      if (hoverCurrentEl !== inputEl) return;
+
+      var queryFiltered = info && info.code ? (extractCodeSmart(info.code) || info.code) : '(无)';
+      card.textContent =
+        '左侧(过滤后): ' + leftFiltered + '\n' +
+        '查询: ' + queryFiltered + '\n' +
+        '来源: ' + (info ? info.source : '-') + '\n' +
+        '模式: ' + (info ? info.mode : '-') + '\n' +
+        'rows: ' + (info ? info.rows : 0);
+
+      card.style.display = 'block';
+      positionHoverCard(inputEl);
+    } catch (e) {
+      if (hoverCurrentEl !== inputEl) return;
+      card.textContent = '左侧(过滤后): ' + leftFiltered + '\n查询异常: ' + String(e);
+      card.style.display = 'block';
+      positionHoverCard(inputEl);
+    }
+  }
+
+  document.addEventListener('mouseover', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) showHoverInfo(t);
+  }, true);
+  document.addEventListener('mouseout', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) hideHoverCard(t);
+  }, true);
+
+  // ===== 主校验 =====
+  function paintCodeNode(node, status){
+    if (!node) return;
+    node.style.backgroundColor = '';
+    if (status === 'fail') { node.style.color = '#d4380d'; node.style.fontWeight = '700'; }
+    else if (status === 'none') { node.style.color = '#d48806'; node.style.fontWeight = '700'; }
+    else if (status === 'ok') { node.style.color = '#389e0d'; node.style.fontWeight = '700'; }
+    else { node.style.color = ''; node.style.fontWeight = ''; }
+  }
+
+    async function runCheckOne(el, snOverride){
+    syncSwitchFromStorage();
+
+    var seq = (__reqSeq.get(el) || 0) + 1;
+    __reqSeq.set(el, seq);
+    function isStale(){ return __reqSeq.get(el) !== seq; }
+
+    var snRaw = toStr(snOverride || el.value);
+      if (!snRaw) {
+      resetNoCodeRetry(el);
+      setSnCheckState(el, 'empty', '空', '');
+      if (isStale()) return;
+      removeRowBubble(el);
+      paintCodeNode(findCodeNodeByInput(el), '');
+      return;
+    }
+
+    if (bomCollectCheckConflictAndLock(el, snRaw)) {
+      return;
+    }
+
+    setSnCheckState(el, 'pending', '查询中', snRaw);
+
+
+    var expected = getNearCode(el);
+    var codeNode = findCodeNodeByInput(el);
+
+    try {
+      var q = await queryCodeHybrid(snRaw);
+      if (isStale()) return;
+
+      var actual = q.code;
+
+      if (!expected) {
+        resetNoCodeRetry(el);
+        setSnCheckState(el, 'fail', '无左侧编码', snRaw);
+        paintCodeNode(codeNode, 'none');
+        showRowBubble(el, '无左侧编码', 'warn');
+
+      } else if (!actual) {
+        paintCodeNode(codeNode, 'none');
+
+        // 查不到编码时先自动重试，防止扫太快接口还没返回数据
+        if (scheduleNoCodeRetry(el, snRaw)) {
+          setSnCheckState(el, 'retry', '未查到编码，重试中', snRaw);
+          return;
+        }
+
+        setSnCheckState(el, 'fail', '无对应编码，已重试' + NO_CODE_RETRY_MAX + '次', snRaw);
+        showRowBubble(el, '无对应编码，已重试' + NO_CODE_RETRY_MAX + '次', 'warn');
+
+      } else if (isCodeEqual(expected, actual)) {
+        resetNoCodeRetry(el);
+        setSnCheckState(el, 'ok', '编码一致', snRaw);
+        paintCodeNode(codeNode, 'ok');
+        removeRowBubble(el);
+
+      } else {
+        resetNoCodeRetry(el);
+
+        var targetEl = autoRouteOn ? tryAutoRouteWrongScan(el, snRaw, actual) : null;
+        if (isStale()) return;
+
+        if (targetEl) {
+          setSnCheckState(el, 'empty', '已转填', '');
+          paintCodeNode(codeNode, 'none');
+          showRowBubble(el, '已转填', 'warn');
+          showRowBubble(targetEl, '已自动填入对应编码行', 'warn');
+        } else {
+          setSnCheckState(el, 'fail', '编码不一致', snRaw);
+          paintCodeNode(codeNode, 'fail');
+          showRowBubble(el, '编码不一致', 'err');
+
+          if (lockOn) {
+            lockedInput = el;
+            lockedValue = toStr(el.value);
+            setTimeout(function(){ try { el.focus(); el.select(); } catch (e) {} }, 0);
+          }
+        }
+      }
+    } catch (e) {
+      if (isStale()) return;
+      resetNoCodeRetry(el);
+      setSnCheckState(el, 'fail', '查询失败', snRaw);
+      paintCodeNode(codeNode, 'fail');
+      showRowBubble(el, '查询失败', 'err');
+    }
+
+    if (isStale()) return;
+    refreshAllBubblePos();
+  }
+
+
+  // ===== 监听 =====
+  // 只鼠标悬停显示详情，不在 focus 时显示
+  document.addEventListener('mouseover', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) showHoverInfo(t);
+  }, true);
+
+
+ // focusin 仅保留锁逻辑（去掉 autoFilled 自动跳下一个）
+document.addEventListener('focusin', function (e) {
+  var t = e.target;
+  if (!t || !t.matches || !t.matches(selector)) return;
+
+  __lastSnInput = t;
+
+  // 锁定优先
+  if (lockOn && lockedInput && t !== lockedInput) {
+    setTimeout(function () {
+      try { lockedInput.focus(); lockedInput.select(); } catch (err) {}
+    }, 0);
+    return;
+  }
+
+  // 已自动转填且有值：自动跳过到下一个空框
+  if (t.dataset && t.dataset.autoFilled === '1' && toStr(t.value)) {
+    var nxt = focusNextEmptyFrom(t);
+    if (nxt) {
+      setTimeout(function () {
+        try { nxt.focus(); } catch (e2) {}
+      }, 0);
+    }
+  }
+}, true);
+
+
+
+  document.addEventListener('focusout', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) {
+      __preJumpSnInput = t; // 记录跳走前SN框
+    }
+  }, true);
+
+  // 修复2：input 改为串行入队
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches(selector)) return;
+    if (t.dataset && t.dataset.snAutoFill === '1') return;
+
+    syncSwitchFromStorage();
+
+       if (toStr(t.value)) {
+      lastScanByInput.set(t, toStr(t.value));
+      lastNonEmptyScanByInput.set(t, toStr(t.value));
+      setSnCheckState(t, 'pending', '等待校验', toStr(t.value));
+    } else {
+      setSnCheckState(t, 'empty', '空', '');
+    }
+
+
+
+    if (lockOn && lockedInput === t && toStr(t.value) !== lockedValue) {
+      lockedInput = null;
+      lockedValue = '';
+    }
+
+    clearTimeout(__checkTimer);
+    __checkTimer = setTimeout(function () {
+      enqueueCheck(t, toStr(t.value));
+    }, 220);
+  }, true);
+
+  // 修复1+2：屏蔽脚本清空回放 + 串行入队
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches(selector)) return;
+
+    syncSwitchFromStorage();
+
+    if (!toStr(t.value)) {
+      if (suppressEmptyReplay.has(t)) return;
+
+      var last = toStr(lastScanByInput.get(t));
+      if (last) {
+        setTimeout(function () {
+          enqueueCheck(t, last);
+        }, 0);
+      }
+    }
+  }, true);
+
+  // 双击解锁
+  document.addEventListener('dblclick', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches(selector)) return;
+
+    if (t.dataset && t.dataset.autoFilled) delete t.dataset.autoFilled;
+
+    try {
+      bomCollectUnlockInput(t);
+    } catch (err) {}
+
+    lockedInput = null;
+    lockedValue = '';
+
+    showRowBubble(t, '已解锁，可手动修改', 'warn');
+    setTimeout(function(){ removeRowBubble(t); }, 1200);
+  }, true);
+
+
+  // Esc 解锁
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      lockedInput = null;
+      lockedValue = '';
+    }
+  }, true);
+
+  // ===== 覆盖这整段：弹窗自动关闭 + 单次回拉 + 不回填但可转填 =====
+  var __lastSnInput = null;
+  var __preJumpSnInput = null;
+  var __snErrBubbleUntil = 0;
+  var __snErrBubbleText = '';
+
+  // 记录当前SN焦点
+  document.addEventListener('focusin', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) {
+      __lastSnInput = t;
+    }
+  }, true);
+
+  // 记录跳走前SN框
+  document.addEventListener('focusout', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches(selector)) {
+      __preJumpSnInput = t;
+    }
+  }, true);
+
+  var __snDialogMo = new MutationObserver(function (list) {
+    list.forEach(function (m) {
+      [].forEach.call(m.addedNodes || [], function (n) {
+        if (!n || n.nodeType !== 1) return;
+
+        var dialog = null;
+        if (n.matches && n.matches('.hae-dialog.popup-dialog, .dialog-tips.hae-dialog')) {
+          dialog = n;
+        } else if (n.querySelector) {
+          dialog = n.querySelector('.hae-dialog.popup-dialog, .dialog-tips.hae-dialog');
+        }
+        if (!dialog) return;
+
+        var txt = (dialog.innerText || '');
+                var isErr1 = txt.indexOf('未配置新编码') >= 0 && txt.indexOf('物料SN[') >= 0;
+        var isErr2 = txt.indexOf('新编码与当前物料编码不一致') >= 0;
+        if (!isErr1 && !isErr2) return;
+
+        // 自动点“确定”
+        var okBtn = dialog.querySelector('button.hae-btn.btn-primary, .btn-primary');
+        if (okBtn) {
+          try { okBtn.click(); } catch (e) {}
+        }
+
+        // 单次回拉（不回填），但用缓存值触发转填
+        setTimeout(function () {
+          var recoverEl = __preJumpSnInput || __lastSnInput;
+          if (!recoverEl || !document.body.contains(recoverEl)) return;
+          if (!(recoverEl.matches && recoverEl.matches(selector))) return;
+
+         // 不回填输入框，但用最近缓存值跑校验/自动转填（含兜底缓存）
+var last = toStr(
+  lastScanByInput.get(recoverEl) ||
+  lastNonEmptyScanByInput.get(recoverEl)
+);
+if (last) {
+  enqueueCheck(recoverEl, last);
+}
+
+
+          var msg = isErr2 ? '系统校验未通过：新编码与当前物料编码不一致，请重新扫描' : '系统校验未通过：未配置新编码，请重新扫描';
+
+          __snErrBubbleText = msg;
+          __snErrBubbleUntil = Date.now() + 5000;
+
+          try { showRowBubble(recoverEl, msg, 'err'); } catch (e) {}
+          try { recoverEl.focus(); recoverEl.select(); } catch (e) {}
+
+          setTimeout(function () {
+            if (Date.now() >= __snErrBubbleUntil && __snErrBubbleText === msg) {
+              try { removeRowBubble(recoverEl); } catch (e) {}
+            }
+          }, 5000);
+        }, 80);
+      });
+    });
+  });
+
+  __snDialogMo.observe(document.documentElement || document.body, {
+    childList: true,
+    subtree: true
+  });
+
+  // ===== 悬浮卡兜底隐藏（防卡住）=====
+  setInterval(function () {
+    if (!hoverCurrentEl) return;
+
+    if (!document.body.contains(hoverCurrentEl)) {
+      hideHoverCard(hoverCurrentEl);
+      hoverCurrentEl = null;
+      return;
+    }
+
+    var over = document.querySelector(selector + ':hover');
+    if (over !== hoverCurrentEl) {
+      hideHoverCard(hoverCurrentEl);
+      hoverCurrentEl = null;
+    }
+  }, 180);
+
+  document.addEventListener('scroll', function () {
+    if (hoverCurrentEl) {
+      hideHoverCard(hoverCurrentEl);
+      hoverCurrentEl = null;
+    }
+  }, true);
+
+  document.addEventListener('mousedown', function () {
+    if (hoverCurrentEl) {
+      hideHoverCard(hoverCurrentEl);
+      hoverCurrentEl = null;
+    }
+  }, true);
+
+ // ===== 清理 =====
+function hasGridRows(){ return document.querySelectorAll('tr.grid-row').length > 0; }
+function allSnEmpty(){
+  var els = document.querySelectorAll(selector);
+  for (var i = 0; i < els.length; i++) {
+    if ((els[i].value || '').trim()) return false;
+  }
+  return true;
+}
+
+setInterval(function () {
+  if (Date.now() < __snErrBubbleUntil) return;
+
+  if (!hasGridRows() || allSnEmpty()) {
+    removeAllRowBubbles();
+    hoverCurrentEl = null;
+  }
+}, 300);
+
+})();
