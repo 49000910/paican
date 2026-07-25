@@ -1,0 +1,445 @@
+// ==UserScript==
+// @name         MES 原表格叠加显示超过100条
+// @namespace    mes.inline.stack.grid
+// @version      1.0
+// @description  MES条码采集表格满100条后，直接在原表格内继续叠加显示
+// @match        https://w3.huawei.com/mespmm/wipweb*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(async function () {
+  'use strict';
+
+  // ===== MES授权门禁 START =====
+  async function __MES_AUTH_GATE__() {
+    var KEY = 'MES_AUTH_CENTER_STATE_V1';
+    var start = Date.now();
+
+    while (Date.now() - start < 10000) {
+      try {
+        var st = JSON.parse(localStorage.getItem(KEY) || 'null');
+
+        if (st && st.ok && Date.now() - Number(st.ts || 0) < 10000) {
+          console.log('[MES授权门禁] 已授权，脚本继续运行：', st.jobNumber);
+          return true;
+        }
+      } catch (e) {}
+
+      await new Promise(function (r) {
+        setTimeout(r, 300);
+      });
+    }
+
+    console.warn('[MES授权门禁] 未授权，脚本已停止运行');
+    return false;
+  }
+
+  if (!(await __MES_AUTH_GATE__())) return;
+  // ===== MES授权门禁 END =====
+
+  // 原脚本代码从这里继续
+
+
+  const ROUTE_KEY = '#/ProductTrackInOut';
+
+  // 你的表格ID
+  const GRID_SELECTOR = '#Grid_18799581';
+
+  // 最多累计显示多少条
+  const MAX_KEEP = 1000;
+
+  // 是否把第一列序号改成累计总数，比如 101、102、103...
+  const RENUMBER_SEQ = true;
+
+  // 检查间隔
+  const CHECK_INTERVAL = 800;
+
+  let accRows = [];
+  let rendering = false;
+  let lastRenderedSig = '';
+  let observer = null;
+  let timer = null;
+  let currentTbody = null;
+  let started = false;
+
+  function log(...args) {
+    console.log('[MES原表格叠加]', ...args);
+  }
+
+  function isTargetRoute() {
+    return location.href.includes(ROUTE_KEY);
+  }
+
+  function getGrid() {
+    return document.querySelector(GRID_SELECTOR) || document.querySelector('.hae-grid');
+  }
+
+  function getTbody() {
+    const grid = getGrid();
+    return grid && grid.querySelector('.grid-body-content');
+  }
+
+  function getBody() {
+    const grid = getGrid();
+    return grid && grid.querySelector('.grid-body');
+  }
+
+  function txt(el) {
+    return (el && el.textContent || '').trim().replace(/\s+/g, ' ');
+  }
+
+  function cell(row, field) {
+    const el = row.querySelector('[field="' + field + '"] .grid-input, [field="' + field + '"]');
+    return txt(el);
+  }
+
+  function readRowsFromDom() {
+    const tbody = getTbody();
+    if (!tbody) return [];
+
+    return Array.from(tbody.querySelectorAll('tr.grid-row')).map(function (tr) {
+      const data = {
+        seqNo: cell(tr, 'seqNo'),
+        sn: cell(tr, 'sn'),
+        rootSn: cell(tr, 'rootSn'),
+        pId: cell(tr, 'pId'),
+        taskNo: cell(tr, 'taskNo'),
+        partNo: cell(tr, 'partNo'),
+        workstepName: cell(tr, 'workstepName'),
+        snGrade: cell(tr, 'snGrade'),
+        snProcessStatus: cell(tr, 'snProcessStatus'),
+        goodRateQty: cell(tr, 'goodRateQty'),
+        scrappedQty: cell(tr, 'scrappedQty')
+      };
+
+      return {
+        html: tr.outerHTML,
+        data
+      };
+    }).filter(function (r) {
+      return r.data.sn || r.data.taskNo || r.data.partNo;
+    });
+  }
+
+  function rowKey(r) {
+    const d = r.data || {};
+
+    // 不用 seqNo 做唯一值，因为序号会随累计数量改变
+    return [
+      d.sn,
+      d.rootSn,
+      d.pId,
+      d.taskNo,
+      d.partNo,
+      d.workstepName,
+      d.snGrade,
+      d.snProcessStatus,
+      d.goodRateQty,
+      d.scrappedQty
+    ].join('|');
+  }
+
+  function listSig(rows) {
+    return rows.map(rowKey).join('\n');
+  }
+
+  function fixRowHtml(item, index, total) {
+    const tb = document.createElement('tbody');
+    tb.innerHTML = item.html;
+
+    const tr = tb.querySelector('tr');
+    if (!tr) return item.html;
+
+    tr.setAttribute('_row', String(index));
+
+    // 避免多个选中行
+    if (index !== 0) {
+      tr.classList.remove('row-actived');
+    }
+
+    if (RENUMBER_SEQ) {
+      const seqCell = tr.querySelector('[field="seqNo"] .grid-input');
+      if (seqCell) {
+        seqCell.textContent = String(total - index);
+      }
+    }
+
+    return tr.outerHTML;
+  }
+
+  function mergeRows(currentRows, oldRows) {
+    const result = currentRows.slice();
+
+    // 用计数方式处理重复SN，避免简单Set误删
+    const countMap = new Map();
+
+    currentRows.forEach(function (r) {
+      const k = rowKey(r);
+      countMap.set(k, (countMap.get(k) || 0) + 1);
+    });
+
+    oldRows.forEach(function (r) {
+      const k = rowKey(r);
+      const n = countMap.get(k) || 0;
+
+      if (n > 0) {
+        countMap.set(k, n - 1);
+      } else {
+        result.push(r);
+      }
+    });
+
+    return result.slice(0, MAX_KEEP);
+  }
+
+  function renderRows() {
+    const tbody = getTbody();
+    if (!tbody) return;
+
+    rendering = true;
+
+    const total = accRows.length;
+
+    tbody.innerHTML = accRows.map(function (r, i) {
+      return fixRowHtml(r, i, total);
+    }).join('');
+
+    const body = getBody();
+
+    if (body) {
+      body.style.overflowY = 'auto';
+      body.style.overflowX = body.style.overflowX || 'auto';
+    }
+
+    lastRenderedSig = listSig(accRows);
+
+    updateBadge();
+
+    setTimeout(function () {
+      rendering = false;
+    }, 80);
+  }
+
+  function checkAndStack() {
+    if (!isTargetRoute()) return;
+    if (rendering) return;
+
+    const tbody = getTbody();
+
+    if (!tbody) return;
+
+    // 如果页面重建了tbody，重新绑定监听
+    if (tbody !== currentTbody) {
+      bindObserver();
+    }
+
+    const domRows = readRowsFromDom();
+
+    if (!domRows.length) return;
+
+    const domSig = listSig(domRows);
+
+    // 如果DOM就是我们自己渲染的，不处理
+    if (domSig === lastRenderedSig) {
+      return;
+    }
+
+    // 页面真实表格一般最多100条，以当前页面最新记录为准，再接上之前累计记录
+    const currentTopRows = domRows.slice(0, 100);
+
+    accRows = mergeRows(currentTopRows, accRows);
+
+    renderRows();
+
+    log('当前累计显示', accRows.length, '条');
+  }
+
+  function createBadge() {
+    const grid = getGrid();
+    if (!grid) return;
+
+    if (document.getElementById('mes-inline-stack-badge')) return;
+
+    const head = grid.querySelector('.hae-grid-head') || grid;
+
+    const badge = document.createElement('div');
+    badge.id = 'mes-inline-stack-badge';
+
+    badge.style.cssText = `
+      padding: 3px 8px;
+      background: #fffbe6;
+      border: 1px solid #ffe58f;
+      color: #333;
+      font-size: 12px;
+      line-height: 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    `;
+
+    badge.innerHTML = `
+      <span>原表格叠加显示已开启，累计：</span>
+      <b id="mes-inline-stack-count">0</b>
+      <span>条</span>
+      <button id="mes-inline-stack-reset" style="font-size:12px;height:22px;">重置</button>
+      <button id="mes-inline-stack-stop" style="font-size:12px;height:22px;">停止</button>
+      <button id="mes-inline-stack-hide" style="font-size:12px;height:22px;">隐藏提示</button>
+    `;
+
+    head.appendChild(badge);
+
+    document.getElementById('mes-inline-stack-reset').onclick = function () {
+      accRows = readRowsFromDom().slice(0, 100);
+      renderRows();
+      log('已重置为当前页面记录');
+    };
+
+    document.getElementById('mes-inline-stack-stop').onclick = function () {
+      stop();
+    };
+
+    document.getElementById('mes-inline-stack-hide').onclick = function () {
+      badge.style.display = 'none';
+    };
+  }
+
+  function updateBadge() {
+    const el = document.getElementById('mes-inline-stack-count');
+    if (el) {
+      el.textContent = String(accRows.length);
+    }
+  }
+
+  function bindObserver() {
+    const tbody = getTbody();
+
+    if (!tbody) return;
+
+    if (observer) {
+      try {
+        observer.disconnect();
+      } catch (e) {}
+    }
+
+    currentTbody = tbody;
+
+    observer = new MutationObserver(function () {
+      if (rendering) return;
+
+      clearTimeout(window.__mesInlineStackTimer);
+
+      window.__mesInlineStackTimer = setTimeout(function () {
+        checkAndStack();
+      }, 120);
+    });
+
+    observer.observe(tbody, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+
+  function start() {
+    if (started) return;
+    if (!isTargetRoute()) return;
+
+    const grid = getGrid();
+    const tbody = getTbody();
+
+    if (!grid || !tbody) {
+      return;
+    }
+
+    started = true;
+
+    createBadge();
+
+    accRows = readRowsFromDom();
+
+    if (accRows.length) {
+      renderRows();
+    }
+
+    bindObserver();
+
+    timer = setInterval(function () {
+      checkAndStack();
+    }, CHECK_INTERVAL);
+
+    window.__mesInlineStack = {
+      rows: function () {
+        return accRows;
+      },
+      count: function () {
+        return accRows.length;
+      },
+      reset: function () {
+        accRows = readRowsFromDom().slice(0, 100);
+        renderRows();
+      },
+      stop: stop
+    };
+
+    log('已启动，当前累计', accRows.length, '条');
+  }
+
+  function stop() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+
+    if (observer) {
+      try {
+        observer.disconnect();
+      } catch (e) {}
+      observer = null;
+    }
+
+    const badge = document.getElementById('mes-inline-stack-badge');
+
+    if (badge) {
+      badge.remove();
+    }
+
+    started = false;
+
+    log('已停止');
+  }
+
+  function bootWait() {
+    if (!isTargetRoute()) return;
+
+    if (getGrid() && getTbody()) {
+      start();
+      return;
+    }
+
+    setTimeout(bootWait, 800);
+  }
+
+  // 兼容单页应用路由变化
+  let lastHref = location.href;
+
+  setInterval(function () {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+
+      if (isTargetRoute()) {
+        setTimeout(bootWait, 1000);
+      } else {
+        stop();
+      }
+    }
+
+    if (isTargetRoute() && !started) {
+      bootWait();
+    }
+  }, 1000);
+
+  bootWait();
+
+})();
