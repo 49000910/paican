@@ -1,0 +1,1774 @@
+// ==UserScript==
+// @name        MES 一体化（固定链接+批量过站）
+// @namespace    tampermonkey.mes.allinone.final
+// @version      3.0
+// @description  固定UI提取条码并回填；手动载入开始；SN重复锁定+常驻气泡
+// @match        *://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @connect      w3.huawei.com
+
+
+
+// @grant        GM_addValueChangeListener
+// ==/UserScript==
+
+(async function () {
+  'use strict';
+
+  // ===== MES授权门禁 START =====
+  async function __MES_AUTH_GATE__() {
+    if (
+      location.hostname === 'mes.huawei.com' &&
+      location.href.indexOf('/mespmm/rptwebnew') >= 0 &&
+      location.hash.indexOf('autoExtract=1') >= 0
+    ) {
+      return true;
+    }
+
+    var KEY = 'MES_AUTH_CENTER_STATE_V1';
+    var start = Date.now();
+
+    while (Date.now() - start < 10000) {
+      try {
+        var st = JSON.parse(localStorage.getItem(KEY) || 'null');
+
+        if (st && st.ok && Date.now() - Number(st.ts || 0) < 10000) {
+          console.log('[MES授权门禁] 已授权，脚本继续运行：', st.jobNumber);
+          return true;
+        }
+      } catch (e) {}
+
+      await new Promise(function (r) {
+        setTimeout(r, 300);
+      });
+    }
+
+    console.warn('[MES授权门禁] 未授权，脚本已停止运行');
+    return false;
+  }
+
+  if (!(await __MES_AUTH_GATE__())) return;
+  // ===== MES授权门禁 END =====
+
+
+  // 固定提取链接（按你要求）
+
+
+  // 固定提取链接（按你要求）
+  var FIXED_UI_URL = 'https://mes.huawei.com/mespmm/rptwebnew#/ProductList#autoExtract=1';
+
+    // ===== 保持登入 =====
+var KEEPALIVE_URL = 'https://w3.huawei.com/mespmm/gateway/com.huawei.supply.mes.mesplus.pspw:mespmmsystemservice/mespmm/sys/only4ssoTimeUpdate.do';
+var KEEPALIVE_CFG_KEY = 'tm_keepalive_cfg';
+var keepAliveTimer = null;
+
+// 任务令条码接口提取，一页最多100条，超过自动翻页
+var TASK_SN_API_BASE = 'https://w3.huawei.com/mespmm/gateway/S007307:mespmmrptservice/mespmm/rpt/services/wipTaskSn/findlist/page';
+
+  var fallbackIndex = 3;
+  var loadingSelector = '#global_toploading_flag';
+
+  // 快慢自适应
+  var tickMs = 50;
+  var maxWaitMs = 60000;
+  var fastPassMs = 1200;
+
+  var KEY_JOB = 'mes_extract_job';
+  var KEY_RESULT = 'mes_extract_result';
+
+  var queue = [];
+  var idx = 0;
+  var running = false;
+  var waiting = false;
+  var waitStart = 0;
+  var submitAt = 0;
+  var currentCode = '';
+  var ticking = false;
+  var sawLoading = false;
+  var loadingGoneCount = 0;
+
+  var extractRunning = false;
+  var lastJobId = '';
+// ===== 条码回车：扫码枪真实Enter后，等待“产品进站成功”，再补一个Enter =====
+var BARCODE_ENTER_KEY = 'tm_barcode_enter_on';
+
+var barcodeEnterPending = false;
+var barcodeEnterTriggerAt = 0;
+var barcodeEnterValue = '';
+var barcodeEnterLastAutoAt = 0;
+var barcodeEnterSending = false;
+var barcodeEnterBoundInput = null;
+var barcodeEnterDocBound = false;
+var barcodeEnterBgStarted = false;
+
+
+// 记录扫码前页面上已有多少条“当前条码进站成功”提示，防止旧提示误触发
+var barcodeEnterSuccessCountBefore = 0;
+
+
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function isVisible(el) {
+    if (!el) return false;
+    var st = getComputedStyle(el);
+    return el.offsetParent !== null && st.display !== 'none' && st.visibility !== 'hidden';
+  }
+
+  function setStatus(msg, color) {
+    color = color || '#333';
+    var el = document.getElementById('tm-batch-status');
+    if (el) {
+      el.textContent = msg;
+      el.style.color = color;
+    }
+    console.log('[MES] ' + msg);
+  }
+
+  function setProgress() {
+    var el = document.getElementById('tm-batch-progress');
+    if (el) el.textContent = idx + '/' + queue.length;
+  }
+    function loadKeepAliveCfg() {
+  try {
+    var c = JSON.parse(localStorage.getItem(KEEPALIVE_CFG_KEY) || '{}');
+    return {
+      enabled: !!c.enabled,
+      sec: Number(c.sec || 600)
+    };
+  } catch (e) {
+    return {
+      enabled: false,
+      sec: 600
+    };
+  }
+}
+
+function saveKeepAliveCfg(c) {
+  localStorage.setItem(KEEPALIVE_CFG_KEY, JSON.stringify(c));
+}
+
+async function keepAliveOnce() {
+  try {
+    // 只在 w3 域名执行，避免其它页面跨域异常
+    if (location.hostname !== 'w3.huawei.com') return;
+
+    var r = await fetch(KEEPALIVE_URL, {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store'
+    });
+
+    var el = document.getElementById('tm-keepalive-status');
+
+    if (r.status === 401) {
+      if (el) {
+        el.textContent = '掉线';
+        el.style.color = '#cf1322';
+      }
+      console.warn('[MES] 保持登入失败：401');
+      return;
+    }
+
+    if (el) {
+      el.textContent = '在线';
+      el.style.color = '#389e0d';
+    }
+
+    console.log('[MES] keepAlive ok:', r.status);
+  } catch (e) {
+    var el2 = document.getElementById('tm-keepalive-status');
+    if (el2) {
+      el2.textContent = '异常';
+      el2.style.color = '#fa8c16';
+    }
+    console.warn('[MES] keepAlive error:', e);
+  }
+}
+
+function restartKeepAlive() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+
+  var cfg = loadKeepAliveCfg();
+
+  if (!cfg.enabled) {
+    var el = document.getElementById('tm-keepalive-status');
+    if (el) {
+      el.textContent = '关';
+      el.style.color = '#666';
+    }
+    return;
+  }
+
+ var ms = Math.max(30, Number(cfg.sec) || 600) * 1000;
+
+  keepAliveTimer = setInterval(function () {
+    keepAliveOnce();
+  }, ms);
+
+  keepAliveOnce();
+}
+
+
+  function parseCodes(txt) {
+    return (txt || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+// ===== 条码回车功能 =====
+function isBarcodeEnterEnabled() {
+  return localStorage.getItem(BARCODE_ENTER_KEY) === '1';
+}
+
+function isBarcodeInput(el) {
+  if (!el) return false;
+
+  var target = getParentInput();
+
+  if (target && el === target) return true;
+
+  var box = el.closest && el.closest('div[id^="Input_"]');
+  var ctx = ((box && box.parentElement ? box.parentElement.innerText : '') || '').replace(/\s+/g, '');
+
+  return ctx.indexOf('条码采集') >= 0;
+}
+
+// 统计页面上“当前条码 + 产品进站成功”的次数
+function countBarcodeTrackInSuccess(code) {
+  if (!code) return 0;
+
+  var text = document.body && document.body.innerText ? document.body.innerText : '';
+
+  if (!text) return 0;
+
+  code = String(code).trim();
+
+  if (!code) return 0;
+
+  var count = 0;
+  var pos = 0;
+
+  while (true) {
+    var idx = text.indexOf(code, pos);
+
+    if (idx < 0) break;
+
+    // 取当前条码附近的文字
+    // 示例：
+    // 【032VBY10S6001881】过站信息：
+    // 产品进站成功!
+    var near = text.slice(Math.max(0, idx - 80), idx + 500);
+
+    var hasSuccess =
+      near.indexOf('产品进站成功') >= 0 ||
+      near.indexOf('进站成功') >= 0;
+
+    var hasInfo =
+      near.indexOf('过站信息') >= 0 ||
+      near.indexOf('进站信息') >= 0 ||
+      near.indexOf('过站') >= 0;
+
+    if (hasSuccess && hasInfo) {
+      count++;
+    }
+
+    pos = idx + code.length;
+
+    if (count > 20) break;
+  }
+
+  return count;
+}
+
+function hasNewBarcodeTrackInSuccess(code) {
+  var nowCount = countBarcodeTrackInSuccess(code);
+  return nowCount > barcodeEnterSuccessCountBefore;
+}
+
+function prepareBarcodeEnter(input, reason) {
+  if (!isBarcodeEnterEnabled()) return;
+
+  // 批量过站运行时不触发，避免冲突
+  if (running || waiting) return;
+
+  // 自己补 Enter 时不触发
+  if (barcodeEnterSending) return;
+
+  var v = input && input.value ? String(input.value).trim() : '';
+
+  if (!v) return;
+
+  // 记录扫码前页面上已有多少条当前条码成功提示，防止旧提示误触发
+  barcodeEnterSuccessCountBefore = countBarcodeTrackInSuccess(v);
+
+  barcodeEnterPending = true;
+  barcodeEnterTriggerAt = Date.now();
+  barcodeEnterValue = v;
+
+  console.log('[MES] 条码回车：已捕获扫码 Enter，等待进站成功提示', {
+    value: v,
+    reason: reason,
+    successCountBefore: barcodeEnterSuccessCountBefore
+  });
+
+  setStatus('条码回车：等待进站成功提示', '#1677ff');
+}
+
+function pressEnterForBarcodeEnter() {
+  var input = getParentInput();
+
+  if (!input) {
+    setStatus('条码回车：未找到条码采集框', '#cf1322');
+    return false;
+  }
+
+  var currentValue = String(input.value || '').trim();
+
+  // 如果输入框内容已经变了，说明用户又扫了别的，避免误补
+  if (barcodeEnterValue && currentValue && currentValue !== barcodeEnterValue) {
+    console.warn('[MES] 条码回车：输入框内容已变化，取消补 Enter', {
+      oldValue: barcodeEnterValue,
+      currentValue: currentValue
+    });
+
+    setStatus('条码回车：条码已变化，取消补 Enter', '#fa8c16');
+    return false;
+  }
+
+  barcodeEnterSending = true;
+
+  try {
+    input.focus();
+
+    var opts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    };
+
+    input.dispatchEvent(new KeyboardEvent('keydown', opts));
+    input.dispatchEvent(new KeyboardEvent('keypress', opts));
+    input.dispatchEvent(new KeyboardEvent('keyup', opts));
+
+    barcodeEnterLastAutoAt = Date.now();
+
+    console.log('[MES] 条码回车：已自动补 Enter', barcodeEnterValue);
+
+    setStatus('条码回车：已自动补 Enter', '#389e0d');
+
+    return true;
+  } finally {
+    setTimeout(function () {
+      barcodeEnterSending = false;
+    }, 500);
+  }
+}
+
+function bindBarcodeEnterInput() {
+  var input = getParentInput();
+
+  if (input) {
+    barcodeEnterBoundInput = input;
+  }
+
+  // document 级监听只绑定一次
+  // 不依赖面板是否显示，也不怕 MES 重渲染输入框
+  if (barcodeEnterDocBound) return;
+
+  barcodeEnterDocBound = true;
+
+  document.addEventListener('', function (e) {
+    try {
+      if (!isBarcodeEnterEnabled()) return;
+
+      if (e.key !== 'Enter' && e.keyCode !== 13) return;
+
+      // 只接受真实扫码枪/键盘 Enter，不接受脚本自己派发的 Enter
+      if (!e.isTrusted) return;
+
+      var target = e.target;
+
+      if (!target) return;
+
+      if (!isBarcodeInput(target)) return;
+
+      barcodeEnterBoundInput = target;
+
+      // 延迟一拍，确保扫码枪输入值已经写入 input.value
+      setTimeout(function () {
+        prepareBarcodeEnter(target, 'background document trusted enter');
+      }, 0);
+
+    } catch (err) {
+      console.warn('[MES] 条码回车：document监听异常', err);
+    }
+  }, true);
+
+  console.log('[MES] 条码回车：document级监听已启动，面板最小化不影响');
+}
+
+
+async function barcodeEnterTick() {
+  if (!isBarcodeEnterEnabled()) {
+    barcodeEnterPending = false;
+    return;
+  }
+
+  // 定期绑定，因为页面可能重渲染输入框
+  bindBarcodeEnterInput();
+
+  if (!barcodeEnterPending) return;
+
+  // 批量过站中不处理
+  if (running || waiting) return;
+
+  var now = Date.now();
+
+  // 超过 15 秒没检测到成功提示，取消本次
+  if (now - barcodeEnterTriggerAt > 15000) {
+    barcodeEnterPending = false;
+
+    console.warn('[MES] 条码回车：等待进站成功提示超时，取消本次', barcodeEnterValue);
+
+    setStatus('条码回车：等待进站成功超时，已取消', '#fa8c16');
+
+    return;
+  }
+
+  // 只判断当前条码是否出现新的“产品进站成功”提示
+  if (!hasNewBarcodeTrackInSuccess(barcodeEnterValue)) {
+    return;
+  }
+
+  // 防止短时间重复补 Enter
+  if (now - barcodeEnterLastAutoAt < 2500) {
+    barcodeEnterPending = false;
+    return;
+  }
+
+  barcodeEnterPending = false;
+
+  console.log('[MES] 条码回车：检测到当前条码进站成功，准备补 Enter', {
+    barcode: barcodeEnterValue,
+    before: barcodeEnterSuccessCountBefore,
+    now: countBarcodeTrackInSuccess(barcodeEnterValue)
+  });
+
+  setStatus('条码回车：检测到进站成功，准备补 Enter', '#389e0d');
+
+  // 稍等页面稳定
+  await sleep(300);
+
+  pressEnterForBarcodeEnter();
+}
+
+    function parseTaskNos(txt) {
+  var tokens = String(txt || '')
+    .toUpperCase()
+    .match(/[A-Z0-9]+/g) || [];
+
+  var out = [];
+  var seen = {};
+
+  for (var i = 0; i < tokens.length; i++) {
+    var t = tokens[i];
+
+    // 任务令一般是 10~12 位，前面至少4位字母，且包含数字
+    // 示例：EPZE145150D、EPZEL452606、DDEDZN051406
+    if (t.length < 10 || t.length > 12) continue;
+    if (!/^[A-Z]{4,8}[A-Z0-9]*$/.test(t)) continue;
+    if (!/[0-9]/.test(t)) continue;
+
+    // 排除明显不是任务令的内容
+    if (t.indexOf('ROHS') >= 0) continue;
+    if (t.indexOf('LINE') === 0) continue;
+    if (t.indexOf('SUB') === 0) continue;
+
+    if (!seen[t]) {
+      seen[t] = 1;
+      out.push(t);
+    }
+  }
+
+  return out;
+}
+
+      // ===== 任务令条码接口提取 =====
+  function taskApiPad2(n) {
+    return n < 10 ? '0' + n : '' + n;
+  }
+
+  function taskApiFmtDateTime(d, endOfDay) {
+    return [
+      d.getFullYear(),
+      taskApiPad2(d.getMonth() + 1),
+      taskApiPad2(d.getDate())
+    ].join('-') + (endOfDay ? ' 23:59:59' : ' 00:00:00');
+  }
+
+  function gmPostJson(url, data) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        data: JSON.stringify(data),
+        timeout: 30000,
+        onload: function (res) {
+          var text = String(res.responseText || '');
+
+          console.groupCollapsed('[TASK-SN-API] 返回 ' + res.status);
+          console.log('URL:', url);
+          console.log('Body:', data);
+          console.log('Response前1500字符:', text.slice(0, 1500));
+          console.groupEnd();
+
+          if (res.status < 200 || res.status >= 300) {
+            reject(new Error('HTTP ' + res.status + '：' + text.slice(0, 200)));
+            return;
+          }
+
+          try {
+            resolve(JSON.parse(text));
+          } catch (e) {
+            reject(new Error('JSON解析失败：' + text.slice(0, 200)));
+          }
+        },
+        onerror: function (e) {
+          try {
+            reject(new Error('请求失败：' + JSON.stringify(e).slice(0, 200)));
+          } catch (err) {
+            reject(new Error('请求失败'));
+          }
+        },
+        ontimeout: function () {
+          reject(new Error('请求超时'));
+        }
+      });
+    });
+  }
+
+  function buildTaskSnBody(taskNo, siteId) {
+    var end = new Date();
+
+    // 查最近180天，任务令比较老也能覆盖
+    var start = new Date(end.getTime() - 180 * 24 * 3600 * 1000);
+
+    return {
+      siteId: String(siteId),
+      snType: 10,
+      partNo: null,
+      sn: null,
+      traySn: null,
+      taskNo: taskNo,
+      workstepName: null,
+      snStatus: null,
+      productSnCategory: '10',
+      createdFrom: taskApiFmtDateTime(start, false),
+      createdTo: taskApiFmtDateTime(end, true)
+    };
+  }
+
+async function queryTaskSnOneMode(taskNo, siteId, modeA, modeB) {
+  var pageSize = 100;
+  var pageNo = 1;
+  var allRows = [];
+  var maxPages = 300;
+
+  while (pageNo <= maxPages) {
+    var url = TASK_SN_API_BASE + '/' + pageSize + '/' + pageNo + '/' + modeA + '/' + modeB;
+    var body = buildTaskSnBody(taskNo, siteId);
+
+    console.log(
+      '[TASK-SN-API] 查询 taskNo=' + String(taskNo).slice(0, 80) +
+      ' siteId=' + siteId +
+      ' mode=' + modeA + '/' + modeB +
+      ' page=' + pageNo
+    );
+
+    var j = await gmPostJson(url, body);
+
+    var vo = j && j.resultObjVO ? j.resultObjVO : {};
+    var pageVO = vo.pageVO || {};
+    var rows = Array.isArray(vo.result) ? vo.result : [];
+
+    console.log(
+      '[TASK-SN-API] page=' + pageNo +
+      ' rows=' + rows.length +
+      ' totalRows=' + (pageVO.totalRows || '') +
+      ' totalPages=' + (pageVO.totalPages || '')
+    );
+
+    allRows = allRows.concat(rows);
+
+
+
+setStatus(
+  '接口翻页：siteId=' + siteId +
+  ' mode=' + modeA + '/' + modeB +
+  ' 第' + pageNo +
+  '页，累计' + allRows.length + '条',
+  '#1677ff'
+);
+
+    // 核心：不要只信 totalPages
+    // 一页最多100条，如果本页少于100，说明到最后一页
+    if (rows.length < pageSize) {
+      break;
+    }
+
+    pageNo++;
+  }
+
+  console.log(
+    '[TASK-SN-API] 完成 siteId=' + siteId +
+    ' mode=' + modeA + '/' + modeB +
+    ' 总rows=' + allRows.length +
+    ' 查询页数=' + pageNo
+  );
+
+  return allRows;
+}
+
+
+async function extractTaskCodesByApi(taskNos) {
+  if (!Array.isArray(taskNos)) {
+    taskNos = parseTaskNos(taskNos);
+  }
+
+  taskNos = taskNos.map(function (x) {
+    return String(x || '').trim().toUpperCase();
+  }).filter(Boolean);
+
+  if (!taskNos.length) {
+    throw new Error('未识别到任务令');
+  }
+
+   // 接口支持多任务令：逗号分隔
+  var taskNoText = taskNos.join(',');
+
+
+  // 两个组织都尝试，避免不同任务令属于不同组织
+  var siteIds = ['50', '66'];
+
+  // 你抓到过 /10/0 和 /0/0，两种都尝试
+  var modes = [
+    [10, 0],
+    [0, 0]
+  ];
+
+  var codeMap = {};
+  var allCodes = [];
+  var hitInfo = [];
+
+  for (var s = 0; s < siteIds.length; s++) {
+    for (var m = 0; m < modes.length; m++) {
+      var siteId = siteIds[s];
+      var modeA = modes[m][0];
+      var modeB = modes[m][1];
+
+      var rows = await queryTaskSnOneMode(taskNoText, siteId, modeA, modeB);
+
+      hitInfo.push({
+        siteId: siteId,
+        mode: modeA + '/' + modeB,
+        rows: rows.length
+      });
+
+      for (var i = 0; i < rows.length; i++) {
+        var sn = rows[i] && rows[i].sn;
+        sn = sn == null ? '' : String(sn).trim();
+
+        if (!sn) continue;
+
+        if (!codeMap[sn]) {
+          codeMap[sn] = 1;
+          allCodes.push(sn);
+        }
+      }
+
+      console.log(
+        '[TASK-SN-API] 组合完成 siteId=' + siteId +
+        ' mode=' + modeA + '/' + modeB +
+        ' rows=' + rows.length +
+        ' 当前累计SN=' + allCodes.length
+      );
+    }
+  }
+
+  return {
+    codes: allCodes,
+    taskNos: taskNos,
+    taskCount: taskNos.length,
+    hitInfo: hitInfo
+  };
+}
+
+
+  function isLoadingVisible() {
+    var el = document.querySelector(loadingSelector);
+    if (!el) return false;
+    var st = getComputedStyle(el);
+    return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+  }
+
+  // ===== 父项过站输入框 =====
+  function getParentInput() {
+    var all = [].slice.call(document.querySelectorAll('div[id^="Input_"] > input.hae-ui-input[type="text"],div[id^="Input_"] > input'));
+    for (var i = 0; i < all.length; i++) {
+      var box = all[i].closest('div[id^="Input_"]');
+      var ctx = ((box && box.parentElement ? box.parentElement.innerText : '') || '').replace(/\s+/g, '');
+      if (ctx.indexOf('条码采集') >= 0) return all[i];
+    }
+    return all[fallbackIndex] || null;
+  }
+
+  async function submitOne(code) {
+    var input = getParentInput();
+    if (!input) {
+      setStatus('未找到“条码采集”输入框', '#cf1322');
+      running = false;
+      return false;
+    }
+
+    input.focus();
+    var desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(input, code);
+    else input.value = code;
+
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await sleep(40);
+
+    var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    input.dispatchEvent(new KeyboardEvent('keydown', opts));
+    input.dispatchEvent(new KeyboardEvent('keypress', opts));
+    input.dispatchEvent(new KeyboardEvent('keyup', opts));
+    return true;
+  }
+
+  async function tick() {
+    if (!running || ticking) return;
+    ticking = true;
+    try {
+      if (waiting) {
+        var on = isLoadingVisible();
+
+        if (on) {
+          sawLoading = true;
+          loadingGoneCount = 0;
+        } else if (sawLoading) {
+          loadingGoneCount++;
+        }
+
+        if (sawLoading && loadingGoneCount >= 2) {
+          waiting = false;
+          idx++;
+          setProgress();
+          await sleep(40);
+          return;
+        }
+
+        if (!sawLoading && (Date.now() - submitAt) >= fastPassMs) {
+          waiting = false;
+          idx++;
+          setProgress();
+          await sleep(40);
+          return;
+        }
+
+        if (Date.now() - waitStart > maxWaitMs) {
+          running = false;
+          waiting = false;
+          setStatus('第 ' + (idx + 1) + ' 条超时：' + currentCode + '，已暂停', '#cf1322');
+        }
+        return;
+      }
+
+      if (idx >= queue.length) {
+        running = false;
+        setStatus('完成：共 ' + queue.length + ' 条', '#389e0d');
+        return;
+      }
+
+currentCode = queue[idx];
+
+      sawLoading = false;
+      loadingGoneCount = 0;
+
+      var ok = await submitOne(currentCode);
+      if (!ok) return;
+
+      submitAt = Date.now();
+      waiting = true;
+      waitStart = Date.now();
+      setStatus('提交中 (' + (idx + 1) + '/' + queue.length + ')：' + currentCode, '#1677ff');
+    } finally {
+      ticking = false;
+    }
+  }
+
+  // ===== 提取逻辑 =====
+  function getTaskMagnifier() {
+    var list = [].slice.call(document.querySelectorAll('a.hae-icon.icon-search')).filter(isVisible);
+    return list[1] || null;
+  }
+
+  function getTaskDialog() {
+    var titles = document.querySelectorAll('.hae-dialog__title');
+    for (var i = 0; i < titles.length; i++) {
+      var t = titles[i];
+      if ((t.innerText || '').indexOf('任务令多输入框') >= 0 && isVisible(t)) {
+        return t.closest('.hae-dialog__wrapper') || t.closest('.hae-dialog-box');
+      }
+    }
+    var form = document.querySelector('#addForm');
+    if (form) return form.closest('.hae-dialog__wrapper') || form.closest('.hae-dialog-box');
+    return null;
+  }
+
+  function getTaskTextarea(dialog) {
+    if (!dialog) return null;
+    return dialog.querySelector('#addForm div[id^="Textarea_"] > textarea.textarea')
+      || dialog.querySelector('#addForm textarea.textarea')
+      || dialog.querySelector('textarea.textarea')
+      || dialog.querySelector('textarea');
+  }
+
+  function setTextareaValue(el, value) {
+    var desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function findBtnByText(txt, root) {
+    root = root || document;
+    var list = root.querySelectorAll('button');
+    for (var i = 0; i < list.length; i++) {
+      if (isVisible(list[i]) && (list[i].innerText || '').trim() === txt) return list[i];
+    }
+    return null;
+  }
+
+  async function waitLoadingDone(max) {
+    max = max || 18000;
+    var start = Date.now();
+    var seen = false;
+    while (Date.now() - start < max) {
+      var on = isLoadingVisible();
+      if (on) seen = true;
+      if (seen && !on) return true;
+      await sleep(120);
+    }
+    return false;
+  }
+
+  async function waitRowsReady(max) {
+    max = max || 12000;
+    var start = Date.now();
+    while (Date.now() - start < max) {
+      if (document.querySelectorAll('tr.grid-row').length > 0) return true;
+      await sleep(150);
+    }
+    return false;
+  }
+
+  function extractCodes() {
+    var list = [].slice.call(document.querySelectorAll('tr.grid-row td:nth-of-type(3) span.grid-input'))
+      .map(function (el) { return (el.innerText || '').trim(); })
+      .filter(Boolean);
+
+    if (!list.length) {
+      list = [].slice.call(document.querySelectorAll('tr.grid-row span.grid-input'))
+        .map(function (el) { return (el.innerText || '').trim(); })
+        .filter(function (v) { return /^[0-9A-Za-z]{8,}$/.test(v); });
+    }
+
+    var map = {};
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      if (!map[list[i]]) { map[list[i]] = 1; out.push(list[i]); }
+    }
+    return out;
+  }
+
+  async function waitUntil(cond, timeout, step) {
+    timeout = timeout || 45000;
+    step = step || 250;
+    var start = Date.now();
+    while (Date.now() - start < timeout) {
+      if (cond()) return true;
+      await sleep(step);
+    }
+    return false;
+  }
+
+  async function waitExtractReady() {
+    var ok = await waitUntil(function () {
+      var mags = [].slice.call(document.querySelectorAll('a.hae-icon.icon-search')).filter(isVisible);
+      return mags.length >= 2;
+    }, 45000, 300);
+    if (!ok) throw new Error('提取页未就绪');
+  }
+
+  async function runExtract(taskNo) {
+    var mag = getTaskMagnifier();
+    if (!mag) throw new Error('未找到任务令放大镜');
+    mag.click();
+    await sleep(250);
+
+    var dialog = null, ta = null;
+    for (var i = 0; i < 100; i++) {
+      dialog = getTaskDialog();
+      ta = getTaskTextarea(dialog);
+      if (dialog && ta && isVisible(ta)) break;
+      await sleep(140);
+    }
+    if (!ta) throw new Error('未找到任务令输入框');
+
+    ta.focus();
+    ta.click();
+    setTextareaValue(ta, taskNo);
+    await sleep(140);
+
+    var saveBtn = findBtnByText('保存', dialog) || findBtnByText('保存', document);
+    if (!saveBtn) throw new Error('未找到保存按钮');
+    saveBtn.click();
+
+    await sleep(260);
+
+    var queryBtn = findBtnByText('查询', document);
+    if (!queryBtn) throw new Error('未找到查询按钮');
+    queryBtn.click();
+
+    var ok = await waitLoadingDone(18000);
+    if (!ok) throw new Error('查询超时');
+
+    var rowsOk = await waitRowsReady(12000);
+    if (!rowsOk) throw new Error('表格未渲染');
+
+    return extractCodes();
+  }
+
+  async function runExtractWithRetry(taskNo, maxTry) {
+    maxTry = maxTry || 3;
+    for (var i = 0; i < maxTry; i++) {
+      try {
+        var codes = await runExtract(taskNo);
+        if (codes.length) return codes;
+      } catch (e) {}
+      await sleep(400);
+    }
+    return [];
+  }
+
+  async function handleJob(job) {
+    if (!job || !job.taskNo) return;
+    if (extractRunning) return;
+    if (job.jobId === lastJobId) return;
+
+    extractRunning = true;
+    lastJobId = job.jobId;
+
+    try {
+      await waitExtractReady();
+      var codes = await runExtractWithRetry(job.taskNo, 3);
+      if (!codes.length) throw new Error('重试后仍未提取到条码');
+
+      await GM_setValue(KEY_RESULT, {
+        ok: true,
+        jobId: job.jobId,
+        taskNo: job.taskNo,
+        codes: codes,
+        ts: Date.now()
+      });
+    } catch (e) {
+      await GM_setValue(KEY_RESULT, {
+        ok: false,
+        jobId: job.jobId,
+        taskNo: job.taskNo,
+        codes: [],
+        err: String(e),
+        ts: Date.now()
+      });
+    } finally {
+      setTimeout(function () { try { window.close(); } catch (e) {} }, 500);
+      extractRunning = false;
+    }
+  }
+
+  async function bgWorker() {
+    if (location.hash.indexOf('autoExtract=1') === -1) return;
+
+    var first = await GM_getValue(KEY_JOB, null);
+    handleJob(first);
+
+    if (typeof GM_addValueChangeListener === 'function') {
+      GM_addValueChangeListener(KEY_JOB, function (_k, _o, n) { handleJob(n); });
+    }
+  }
+
+function startBarcodeEnterBackgroundService() {
+  if (barcodeEnterBgStarted) return;
+
+  barcodeEnterBgStarted = true;
+
+  var bgPending = false;
+  var bgInput = null;
+  var bgCode = '';
+  var bgTriggerAt = 0;
+  var bgSawLoading = false;
+  var bgLoadingGoneCount = 0;
+  var bgLastAutoAt = 0;
+
+  // 最长等待 loading 出现时间
+  // 超过这个时间没看到 loading，就取消，不补 Enter
+  var BG_WAIT_LOADING_MS = 8000;
+
+  // 最长总等待时间
+  var BG_MAX_WAIT_MS = 30000;
+
+  function bgMakeEnterEvent(type) {
+    var e = new KeyboardEvent(type, {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true
+    });
+
+    try {
+      Object.defineProperty(e, 'keyCode', {
+        get: function () {
+          return 13;
+        }
+      });
+    } catch (err) {}
+
+    try {
+      Object.defineProperty(e, 'which', {
+        get: function () {
+          return 13;
+        }
+      });
+    } catch (err2) {}
+
+    return e;
+  }
+
+  function bgPressEnter(reason) {
+    var input = bgInput;
+
+    if (!input || !document.contains(input)) {
+      input = getParentInput();
+    }
+
+    if (!input) {
+      console.warn('[MES] 条码回车后台：未找到条码采集框，无法补Enter');
+      setStatus('条码回车：未找到条码采集框', '#cf1322');
+      return false;
+    }
+
+    if (Date.now() - bgLastAutoAt < 1200) {
+      console.warn('[MES] 条码回车后台：距离上次补Enter太近，跳过');
+      return false;
+    }
+
+    barcodeEnterSending = true;
+
+    try {
+      input.focus();
+
+      input.dispatchEvent(bgMakeEnterEvent('keydown'));
+      input.dispatchEvent(bgMakeEnterEvent('keypress'));
+      input.dispatchEvent(bgMakeEnterEvent('keyup'));
+
+      bgLastAutoAt = Date.now();
+      barcodeEnterLastAutoAt = Date.now();
+
+      console.log('[MES] 条码回车后台：检测到loading结束，已补Enter', {
+        reason: reason,
+        barcode: bgCode,
+        inputValue: String(input.value || '')
+      });
+
+      setStatus('条码回车：loading结束，已补 Enter', '#389e0d');
+
+      return true;
+    } finally {
+      setTimeout(function () {
+        barcodeEnterSending = false;
+      }, 500);
+    }
+  }
+
+  function bgIsBarcodeTarget(target) {
+    if (!target) return false;
+
+    var p = getParentInput();
+
+    if (p && target === p) return true;
+
+    try {
+      if (isBarcodeInput(target)) return true;
+    } catch (e) {}
+
+    return false;
+  }
+
+  document.addEventListener('keydown', function (e) {
+    try {
+      if (!isBarcodeEnterEnabled()) return;
+
+      if (barcodeEnterSending) return;
+
+      if (e.key !== 'Enter' && e.keyCode !== 13) return;
+
+      // 只处理扫码枪/键盘真实 Enter
+      if (!e.isTrusted) return;
+
+      var target = e.target;
+
+      // 只处理条码采集框
+      if (!bgIsBarcodeTarget(target)) return;
+
+      var v = String(target.value || '').trim();
+
+      if (!v) return;
+
+        bgPending = true;
+        bgInput = target;
+        bgCode = v;
+        bgTriggerAt = Date.now();
+        bgSawLoading = false;
+        bgLoadingGoneCount = 0;
+        barcodeEnterBoundInput = target;
+
+
+      console.log('[MES] 条码回车后台：捕获条码真实Enter，等待loading出现', {
+        barcode: bgCode,
+        panelHidden: !!document.getElementById('tm-fab') &&
+          getComputedStyle(document.getElementById('tm-fab')).display !== 'none'
+      });
+
+      setStatus('条码回车：等待loading', '#1677ff');
+
+    } catch (err) {
+      console.warn('[MES] 条码回车后台：真实Enter监听异常', err);
+    }
+  }, true);
+
+  setInterval(function () {
+    try {
+      if (!isBarcodeEnterEnabled()) {
+        bgPending = false;
+        return;
+      }
+
+      if (!bgPending) return;
+
+      var now = Date.now();
+      var loading = false;
+
+      try {
+        loading = isLoadingVisible();
+      } catch (e) {
+        loading = false;
+      }
+
+      // 看到 loading
+      if (loading) {
+        bgSawLoading = true;
+        bgLoadingGoneCount = 0;
+
+        setStatus('条码回车：检测到loading，等待结束', '#1677ff');
+        return;
+      }
+
+      // 已经看到过 loading，现在 loading 消失
+      if (bgSawLoading && !loading) {
+        bgLoadingGoneCount++;
+
+        // 连续检测两次消失，认为页面缓冲结束
+        if (bgLoadingGoneCount >= 2) {
+          bgPending = false;
+
+          setTimeout(function () {
+            bgPressEnter('loading finished');
+          }, 200);
+
+          return;
+        }
+      }
+
+      // 没看到 loading，超过等待时间：取消，不补 Enter
+      if (!bgSawLoading && now - bgTriggerAt >= BG_WAIT_LOADING_MS) {
+        bgPending = false;
+
+        console.warn('[MES] 条码回车后台：未检测到loading，取消本次，不补Enter', {
+          barcode: bgCode,
+          waitMs: BG_WAIT_LOADING_MS
+        });
+
+        setStatus('条码回车：未检测到loading，已取消', '#fa8c16');
+        return;
+      }
+
+      // 总超时保护：取消，不补 Enter
+      if (now - bgTriggerAt >= BG_MAX_WAIT_MS) {
+        bgPending = false;
+
+        console.warn('[MES] 条码回车后台：等待loading结束超时，取消本次，不补Enter', {
+          barcode: bgCode,
+          waitMs: BG_MAX_WAIT_MS
+        });
+
+        setStatus('条码回车：等待loading超时，已取消', '#fa8c16');
+        return;
+      }
+
+    } catch (err) {
+      console.warn('[MES] 条码回车后台：检测异常', err);
+    }
+  }, 100);
+
+  console.log('[MES] 条码回车独立后台服务已启动：只检测loading，未检测到不补Enter');
+}
+
+
+
+
+
+
+
+// ===== UI =====
+function buildPanel() {
+  if (document.getElementById('tm-main-panel')) return;
+
+  var CFG_KEY = 'tm_auto_pass_cfg';
+  var PANEL_STATE_KEY = 'tm_panel_state';
+  var SN_LOCK_KEY = 'sn_code_check_lock_on';
+  var SN_ROUTE_KEY = 'sn_code_auto_route_on';
+  var AUTO_PASS_MODE_KEY = 'auto_pass_mode';
+  var AUTO_PASS_MODE_BOM_ATE = 'bom_ate';
+  var AUTO_PASS_MODE_BOM_ONLY = 'bom_only';
+
+  function loadCfg() {
+    try {
+      var c = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
+      return { enabled: !!c.enabled };
+    } catch (e) {
+      return { enabled: false };
+    }
+  }
+
+  function loadPanelState() {
+    try {
+      return JSON.parse(localStorage.getItem(PANEL_STATE_KEY) || '{}');
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function savePanelState(state) {
+    var old = loadPanelState();
+    var next = Object.assign({}, old, state);
+    localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(next));
+  }
+
+  var box = document.createElement('div');
+  box.id = 'tm-main-panel';
+  box.style.position = 'fixed';
+  box.style.right = '16px';
+  box.style.bottom = '16px';
+  box.style.zIndex = '999999';
+  box.style.width = '360px';
+  box.style.background = '#fff';
+  box.style.border = '1px solid #d9d9d9';
+  box.style.borderRadius = '8px';
+  box.style.boxShadow = '0 4px 14px rgba(0,0,0,.15)';
+  box.style.fontSize = '12px';
+  box.style.padding = '10px';
+
+  box.innerHTML =
+   '<div id="tm-head" style="font-weight:600;margin-bottom:8px;cursor:move;display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
+  '<span>82023703MES专用</span>' +
+  '<div style="display:flex;align-items:center;gap:6px;cursor:default;font-weight:400;">' +
+    '<label title="保持w3登录态" style="white-space:nowrap;"><input id="tm-keepalive-on" type="checkbox"> 保持W3登入</label>' +
+    '<span id="tm-keepalive-status" style="color:#666;">关</span>' +
+    '<button id="tm-toggle" style="border:0;background:#f0f0f0;border-radius:6px;padding:2px 8px;cursor:pointer;">最小化</button>' +
+  '</div>' +
+'</div>' +
+
+    '<div id="tm-body">' +
+    '<div>任务令，可粘贴排产文本，自动过滤任务令</div>' +
+'<textarea id="tm-taskno" style="width:100%;height:38px;min-height:32px;max-height:90px;resize:vertical;box-sizing:border-box;margin:4px 0 8px;" placeholder="可输入多个任务令，或粘贴排产文本"></textarea>' +
+
+'<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
+'<button id="tm-paste-task">粘贴剪贴板</button>' +
+ '<button id="tm-extract-api">接口提取</button>' +
+'<button id="tm-extract-run">提取条码</button>' +
+
+'</div>' +
+
+
+      '<hr style="margin:10px 0;">' +
+      '<div>批量条码列表（每行一个）</div>' +
+      '<textarea id="tm-batch-input" style="width:100%;height:110px;box-sizing:border-box;"></textarea>' +
+    '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' +
+'<button id="tm-load">载入</button>' +
+'<button id="tm-start">开始</button>' +
+'<button id="tm-pause">暂停</button>' +
+'<button id="tm-reset">重置</button>' +
+'<label title="扫码枪输入条码并触发真实Enter后，等待产品进站成功，再自动补一个Enter" style="white-space:nowrap;">' +
+'<input id="tm-barcode-enter-on" type="checkbox"> 条码回车' +
+'</label>' +
+'</div>' +
+
+          '<hr style="margin:10px 0;">' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+      '<label title="编码不一致时锁定当前SN框"><input id="tm-sn-lock-on" type="checkbox"> SN拦截</label>' +
+      '<label title="SN扫错位置时自动转填到对应编码行"><input id="tm-sn-route-on" type="checkbox"> SN归位</label>' +
+      '<label title="BOM子项校验通过后，还要ATE测试通过才过站"><input id="tm-pass-mode-bom-ate" name="tm-pass-mode" type="radio" value="bom_ate"> 校验+ATE</label>' +
+      '<label title="只要BOM子项校验通过就过站，不查ATE"><input id="tm-pass-mode-bom-only" name="tm-pass-mode" type="radio" value="bom_only"> 只校验</label>' +
+      '</div>' +
+      '<div id="tm-sn-status" style="margin-top:4px;color:#666;">SN校验：待命</div>' +
+      '<div id="tm-pass-mode-status" style="margin-top:2px;color:#666;">过站模式：待命</div>' +
+
+
+      '<div style="margin-top:8px;">进度：<span id="tm-batch-progress">0/0</span></div>' +
+      '<div id="tm-batch-status" style="margin-top:4px;color:#333;">待命</div>' +
+    '</div>';
+
+  document.body.appendChild(box);
+
+  // 折叠/展开 + 状态记忆
+  var bodyWrap = box.querySelector('#tm-body');
+  var toggleBtn = box.querySelector('#tm-toggle');
+  var keepAliveOn = box.querySelector('#tm-keepalive-on');
+
+  var st = loadPanelState();
+  var collapsed = !!st.collapsed;
+
+  // 悬浮球（简版）
+  var fab = document.createElement('div');
+  fab.id = 'tm-fab';
+  fab.textContent = 'qiu';
+  fab.style.position = 'fixed';
+  fab.style.right = '18px';
+  fab.style.bottom = '18px';
+  fab.style.width = '46px';
+  fab.style.height = '46px';
+  fab.style.borderRadius = '50%';
+  fab.style.background = '#1677ff';
+  fab.style.color = '#fff';
+  fab.style.display = 'none';
+  fab.style.alignItems = 'center';
+  fab.style.justifyContent = 'center';
+  fab.style.fontSize = '12px';
+  fab.style.cursor = 'pointer';
+  fab.style.zIndex = '1000001';
+  fab.style.boxShadow = '0 6px 18px rgba(0,0,0,.25)';
+  fab.title = '点击展开面板';
+  document.body.appendChild(fab);
+
+  function applyCollapsed() {
+    bodyWrap.style.display = collapsed ? 'none' : '';
+    toggleBtn.textContent = collapsed ? '展开' : '最小化';
+    box.style.width = collapsed ? '220px' : '360px';
+  }
+  applyCollapsed();
+// 保持登入初始化
+(function initKeepAliveSwitch() {
+  var kc = loadKeepAliveCfg();
+
+  keepAliveOn.checked = !!kc.enabled;
+
+  var stEl = box.querySelector('#tm-keepalive-status');
+  if (stEl) {
+    stEl.textContent = keepAliveOn.checked ? '启动中' : '关';
+    stEl.style.color = keepAliveOn.checked ? '#1677ff' : '#666';
+  }
+
+  keepAliveOn.addEventListener('change', function (e) {
+    e.stopPropagation();
+
+    var next = loadKeepAliveCfg();
+    next.enabled = !!keepAliveOn.checked;
+    if (!next.sec) next.sec = 90;
+
+    saveKeepAliveCfg(next);
+    restartKeepAlive();
+
+    var el = box.querySelector('#tm-keepalive-status');
+    if (el) {
+      el.textContent = keepAliveOn.checked ? '启动中' : '关';
+      el.style.color = keepAliveOn.checked ? '#1677ff' : '#666';
+    }
+  });
+
+  restartKeepAlive();
+})();
+var keepAliveLabel = box.querySelector('label[title="保持w3登录态"]');
+if (keepAliveLabel) {
+  keepAliveLabel.addEventListener('mousedown', function (e) {
+    e.stopPropagation();
+  }, true);
+}
+if (keepAliveOn) {
+  keepAliveOn.addEventListener('mousedown', function (e) {
+    e.stopPropagation();
+  }, true);
+}
+
+
+  toggleBtn.onclick = function (e) {
+    e.stopPropagation();
+    collapsed = !collapsed;
+    applyCollapsed();
+    savePanelState({ collapsed: collapsed });
+
+    if (collapsed) {
+      box.style.display = 'none';
+      fab.style.display = 'flex';
+    } else {
+      box.style.display = '';
+      fab.style.display = 'none';
+    }
+  };
+
+  fab.onclick = function () {
+    box.style.display = '';
+    fab.style.display = 'none';
+    collapsed = false;
+    applyCollapsed();
+    savePanelState({ collapsed: false });
+  };
+
+  // 拖拽
+  (function makeDrag(panel, head) {
+    var down = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    head.addEventListener('mousedown', function (e) {
+      down = true; sx = e.clientX; sy = e.clientY;
+      var r = panel.getBoundingClientRect();
+      ox = r.left; oy = r.top;
+      panel.style.left = ox + 'px';
+      panel.style.top = oy + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!down) return;
+      panel.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
+      panel.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+    });
+    document.addEventListener('mouseup', function () {
+      if (!down) return;
+      down = false;
+      document.body.style.userSelect = '';
+      var r = panel.getBoundingClientRect();
+      savePanelState({ left: r.left, top: r.top });
+    });
+  })(box, box.querySelector('#tm-head'));
+
+  // 恢复上次位置
+  if (typeof st.left === 'number' && typeof st.top === 'number') {
+    box.style.left = Math.max(0, st.left) + 'px';
+    box.style.top = Math.max(0, st.top) + 'px';
+    box.style.right = 'auto';
+    box.style.bottom = 'auto';
+  }
+
+  // 首次加载如果上次是折叠，直接显示悬浮球
+  if (collapsed) {
+    box.style.display = 'none';
+    fab.style.display = 'flex';
+  }
+
+    var taskInput = box.querySelector('#tm-taskno');
+    var ta = box.querySelector('#tm-batch-input');
+    var barcodeEnterOn = box.querySelector('#tm-barcode-enter-on');
+    var snLockOn = box.querySelector('#tm-sn-lock-on');
+    var snRouteOn = box.querySelector('#tm-sn-route-on');
+    var passModeBomAte = box.querySelector('#tm-pass-mode-bom-ate');
+    var passModeBomOnly = box.querySelector('#tm-pass-mode-bom-only');
+
+
+
+  function applySnCfgNow() {
+    localStorage.setItem(SN_LOCK_KEY, snLockOn.checked ? '1' : '0');
+    localStorage.setItem(SN_ROUTE_KEY, snRouteOn.checked ? '1' : '0');
+
+    var s = box.querySelector('#tm-sn-status');
+    if (s) {
+      s.textContent = 'SN校验：拦截' + (snLockOn.checked ? '开' : '关') + ' / 归位' + (snRouteOn.checked ? '开' : '关');
+      s.style.color = (snLockOn.checked || snRouteOn.checked) ? '#389e0d' : '#666';
+    }
+  }
+      function applyAutoPassModeNow() {
+    var mode = passModeBomOnly.checked ? AUTO_PASS_MODE_BOM_ONLY : AUTO_PASS_MODE_BOM_ATE;
+
+    localStorage.setItem(AUTO_PASS_MODE_KEY, mode);
+
+    var s = box.querySelector('#tm-pass-mode-status');
+    if (s) {
+      if (mode === AUTO_PASS_MODE_BOM_ONLY) {
+        s.textContent = '过站：只校验';
+        s.style.color = '#fa8c16';
+      } else {
+        s.textContent = '过站：校验+ATE';
+        s.style.color = '#389e0d';
+      }
+    }
+
+    console.log('[MES] 自动过站模式:', mode);
+  }
+
+  function initAutoPassModeUi() {
+    var mode = localStorage.getItem(AUTO_PASS_MODE_KEY) || AUTO_PASS_MODE_BOM_ATE;
+
+    if (mode === AUTO_PASS_MODE_BOM_ONLY) {
+      passModeBomOnly.checked = true;
+      passModeBomAte.checked = false;
+    } else {
+      passModeBomAte.checked = true;
+      passModeBomOnly.checked = false;
+    }
+
+    applyAutoPassModeNow();
+  }
+
+
+
+  snLockOn.addEventListener('change', applySnCfgNow);
+  snRouteOn.addEventListener('change', applySnCfgNow);
+  passModeBomAte.addEventListener('change', applyAutoPassModeNow);
+  passModeBomOnly.addEventListener('change', applyAutoPassModeNow);
+// 条码回车开关初始化
+if (barcodeEnterOn) {
+  barcodeEnterOn.checked = localStorage.getItem(BARCODE_ENTER_KEY) === '1';
+
+  barcodeEnterOn.addEventListener('change', function () {
+    localStorage.setItem(BARCODE_ENTER_KEY, barcodeEnterOn.checked ? '1' : '0');
+
+    barcodeEnterPending = false;
+    barcodeEnterSuccessCountBefore = 0;
+
+    setStatus(
+      '条码回车：' + (barcodeEnterOn.checked ? '开' : '关'),
+      barcodeEnterOn.checked ? '#389e0d' : '#666'
+    );
+
+    if (barcodeEnterOn.checked) {
+      bindBarcodeEnterInput();
+    }
+  });
+
+  if (barcodeEnterOn.checked) {
+    bindBarcodeEnterInput();
+  }
+}
+
+
+  box.querySelector('#tm-paste-task').onclick = async function () {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        setStatus('浏览器不支持直接读取剪贴板，请手动 Ctrl+V', '#fa8c16');
+        try {
+          taskInput.focus();
+          taskInput.select();
+        } catch (e) {}
+        return;
+      }
+
+      var text = await navigator.clipboard.readText();
+
+      if (!text) {
+        setStatus('剪贴板为空', '#fa8c16');
+        return;
+      }
+
+      taskInput.value = text;
+      taskInput.dispatchEvent(new Event('input', { bubbles: true }));
+      taskInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+      var taskNos = parseTaskNos(text);
+
+      if (taskNos.length) {
+        setStatus('已粘贴，识别到任务令 ' + taskNos.length + ' 个', '#389e0d');
+        console.log('[TASK-NO] 识别到任务令:', taskNos);
+      } else {
+        setStatus('已粘贴，但未识别到任务令', '#fa8c16');
+      }
+    } catch (e) {
+      console.error('[TASK-NO] 读取剪贴板失败:', e);
+      setStatus('读取剪贴板失败，请手动 Ctrl+V', '#cf1322');
+
+      try {
+        taskInput.focus();
+        taskInput.select();
+      } catch (err) {}
+    }
+  };
+
+  box.querySelector('#tm-extract-run').onclick = async function () {
+    var taskNos = parseTaskNos(taskInput.value);
+    if (!taskNos.length) return setStatus('未识别到任务令', '#cf1322');
+
+    // 固定链接提取保持原逻辑，只取第一个任务令
+    var taskNo = taskNos[0];
+
+    if (taskNos.length > 1) {
+      setStatus('固定提取只使用第一个任务令：' + taskNo + '，多个请用接口提取', '#fa8c16');
+    }
+
+    var jobId = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    await GM_setValue(KEY_JOB, { jobId: jobId, taskNo: taskNo, ts: Date.now() });
+
+    GM_openInTab(FIXED_UI_URL, { active: true, insert: true, setParent: true });
+    setStatus('已打开固定提取页并发送任务：' + taskNo);
+  };
+
+      box.querySelector('#tm-extract-api').onclick = async function () {
+    var taskNos = parseTaskNos(taskInput.value);
+
+    if (!taskNos.length) {
+      return setStatus('未识别到任务令', '#cf1322');
+    }
+
+    try {
+      setStatus('识别到任务令 ' + taskNos.length + ' 个，接口批量提取中...', '#1677ff');
+
+      var ret = await extractTaskCodesByApi(taskNos);
+      var codes = ret.codes || [];
+
+      if (!codes.length) {
+        setStatus('接口未提取到条码：任务令' + taskNos.length + '个', '#fa8c16');
+        console.log('[TASK-SN-API] 未提取到，任务令:', taskNos);
+        console.log('[TASK-SN-API] 查询组合:', ret.hitInfo);
+        return;
+      }
+
+      ta.value = codes.join('\n');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      ta.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // 自动载入到批量队列
+      queue = parseCodes(ta.value);
+      idx = 0;
+      running = false;
+      waiting = false;
+      currentCode = '';
+
+      setProgress();
+
+      setStatus(
+        '接口提取成功：任务令' + ret.taskCount +
+        '个，条码' + queue.length +
+        '条，已自动载入',
+        '#389e0d'
+      );
+
+      console.log('[TASK-SN-API] 任务令:', ret.taskNos);
+      console.log('[TASK-SN-API] 查询组合:', ret.hitInfo);
+      console.log('[TASK-SN-API] SN数量:', queue.length);
+
+    } catch (e) {
+      console.error('[TASK-SN-API] 接口提取失败:', e);
+      setStatus('接口提取失败：' + (e && e.message ? e.message : String(e)), '#cf1322');
+    }
+  };
+
+
+
+
+  box.querySelector('#tm-load').onclick = function () {
+    queue = parseCodes(ta.value);
+    idx = 0; running = false; waiting = false; currentCode = '';
+    setProgress();
+    setStatus('已载入 ' + queue.length + ' 条');
+  };
+
+  box.querySelector('#tm-start').onclick = function () {
+    if (!queue.length) return setStatus('请先载入条码', '#cf1322');
+    running = true;
+    setStatus('开始执行...', '#1677ff');
+  };
+
+  box.querySelector('#tm-pause').onclick = function () {
+    running = false; waiting = false;
+    setStatus('已暂停', '#fa8c16');
+  };
+
+  box.querySelector('#tm-reset').onclick = function () {
+    running = false; waiting = false; idx = 0; currentCode = '';
+    setProgress();
+    setStatus('已重置');
+  };
+
+  if (typeof GM_addValueChangeListener === 'function') {
+    GM_addValueChangeListener(KEY_RESULT, function (_k, _o, r) {
+      if (!r) return;
+      if (!r.ok) return setStatus('提取失败：' + (r.err || '未知错误'), '#cf1322');
+
+      ta.value = (r.codes || []).join('\n');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      ta.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // 自动载入
+      queue = parseCodes(ta.value);
+      idx = 0; running = false; waiting = false; currentCode = '';
+      setProgress();
+
+      setStatus('提取成功：' + queue.length + ' 条，已自动载入', '#1677ff');
+    });
+  }
+
+  // SN 开关初始化
+  snLockOn.checked = localStorage.getItem(SN_LOCK_KEY) === '1';
+  snRouteOn.checked = localStorage.getItem(SN_ROUTE_KEY) !== '0';
+  applySnCfgNow();
+
+  // 自动过站模式初始化
+  initAutoPassModeUi();
+
+setInterval(function () { tick(); }, tickMs);
+
+// 条码回车检测已移动到独立后台服务 startBarcodeEnterBackgroundService()
+// 不要在这里重复启动，避免重复执行
+
+
+}
+
+
+
+function boot() {
+  buildPanel();
+
+  startBarcodeEnterBackgroundService();
+
+  bgWorker();
+}
+
+
+
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
+})();
